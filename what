@@ -1,0 +1,97 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#) File        : what
+# @(#) Author      : Thorsten Thiel
+# @(#)
+# @(#) Version     : 1.0
+# @(#)
+# @(#) Description : Displays identifying information in files.
+# @(#)
+# @(#) Syntax      : what [-v|-h] Pathname/File
+# @(#)
+# @(#) Parameters  : -v,                       print change history, too
+# @(#)               -h,                       help screen
+# @(#)
+# @(#) Attention   :
+# @(#)
+# @@(#) Change History:
+# @@(#)
+# @@(#) 1.0 10.12.2015 THI   Created
+# @@(#) 1.1 11.12.2015 THI   Parameter -v eingefuehrt
+# @(#) ================================================================================================================
+#-----------------------------------------------------------------------------------------------------------------
+# Functions
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo "  File        : what"
+echo "  Author      : Thorsten Thiel"
+echo ""
+echo "  Version     : 1.0"
+echo ""
+echo "  Description : Displays identifying information in files."
+echo ""
+echo "  Syntax      : what [-v|-h] Pathname/File"
+echo ""
+echo "  Parameters  : -v,                       print change history, too"
+echo "                -h,                       help screen"
+echo ""
+echo "  Attention   :"
+}
+
+function no_param ()
+{
+cat <<EOUSAGE
+
+Das Skript benoetigt einen Dateinamen (mit Pfad) als Eingabe!
+
+Es wurde kein Uebergabeparameter mitgegeben!
+
+exit ...
+EOUSAGE
+}
+
+
+function test_file ()
+{
+if [ ! -s $1 ]
+then
+cat <<EOFILE
+
+Die Datei >$1< existiert nicht oder ist nicht lesbar!
+
+exit ...
+EOFILE
+exit
+fi
+}
+#-----------------------------------------------------------------------------------------------------------------
+# Main
+#-----------------------------------------------------------------------------------------------------------------
+if [ $# -lt 1 ]
+then
+   no_param
+   usage
+   exit 1
+fi
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+verbose=0
+while true; do
+  case "$1" in
+    -v ) verbose=1; shift 1 ;;
+    -h | -? | --help ) usage; exit ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+
+test_file $1
+if [ $verbose -eq 0 ]
+then
+   grep "^# @(#)" $1
+else
+   grep -e "^# @(#)" -e "^# @@(#)" $1
+fi
+
