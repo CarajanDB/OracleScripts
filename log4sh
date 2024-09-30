@@ -21,39 +21,18 @@
 # *) the appender levels are as follows (decreasing order of output):
 #    TRACE, DEBUG, INFO, WARN, ERROR, FATAL, OFF
 # </s:header>
-#
-#
-# @@(#)  Change History:
-# @@(#)  Version  Date        Author        Description
-# @@(#)  ------------------------------------------------------------------------------------------------
-# @@(#)  0.1      2022-12-06  J. Ahrends    unsetting Shell Option -x while running log4sh
-# @@(#)  0.2      2024-02-06  M. Pils       enhanced incompatible shell flags handling
-# @@(#)  0.3      2024-05-22  M. Pils       fixed _log4sh_cleanup() for empty "${_lc__trap}"
-# @(#) ================================================================================================================
 #*/
-
-# save the current set of shell flags, and then set some for log4sh
-__log4sh_oldShellFlags=$-
 
 # shell flags for log4sh:
 # u - treat unset variables as an error when performing parameter expansion
 __LOG4SH_SHELL_FLAGS='u'
+
+# save the current set of shell flags, and then set some for log4sh
+__log4sh_oldShellFlags=$-
 for _log4sh_shellFlag in `echo "${__LOG4SH_SHELL_FLAGS}" |sed 's/\(.\)/\1 /g'`
 do
   set -${_log4sh_shellFlag}
 done
-unset _log4sh_shellFlag
-
-# Johannes Ahrends, CarajanDB GmbH + Marcel Pils, Logicalis GmbH
-# shell flags not compatible with log4sh:
-# x - all executed commands are printed to the terminal
-# e - instructs bash to immediately exit if any command has a non-zero exit status
-__LOG4SH_INCOMPATIBLE_SHELL_FLAGS='xe'
-for _shellFlag in `echo "${__LOG4SH_INCOMPATIBLE_SHELL_FLAGS}" |sed 's/\(.\)/\1 /g'`
-do
-  set +${_shellFlag}
-done
-unset _shellFlag
 
 #
 # constants
@@ -2908,8 +2887,6 @@ log()
   # if no message was passed, read it from STDIN
   [ $# -ne 0 ] && _l_msg="$@" || _l_msg=`cat`
 
-  [[ ${-/x} != $- ]] && set +x
-
   __log4sh_return=${__LOG4SH_TRUE}
   _l_levelInt=`logger_level_toInt ${_l_level}`
   if [ $? -eq ${__LOG4SH_TRUE} ]; then
@@ -2944,11 +2921,6 @@ log()
 
   unset _l_msg _l_oldIFS _l_level _l_levelInt
   unset _l_appenderIndex _l_appenderLevel _l_appenderLevelInt _l_appenderName
-
-  for _log4sh_shellFlag in ${__log4sh_oldShellFlags}
-  do
-     [[ ${-/${_log4sh_shellFlag}} != ${__log4sh_oldShellFlags} ]] && set -${_log4sh_shellFlag}
-  done
   return ${__log4sh_return}
 }
 
@@ -3795,10 +3767,7 @@ _log4sh_cleanup()
   fi
 
   # exit for all non-EXIT signals
-  # if [ "${_lc__trap}" != 'EXIT' ]; then
-  # 22.05.2024, mpils, fix for undefined _lc__trap variable
-  # for cases when source log4sh more than one time
-  if [ -n "${_lc__trap}" -a "${_lc__trap}" != 'EXIT' ]; then
+  if [ "${_lc__trap}" != 'EXIT' ]; then
     # disable the EXIT trap
     trap 0
 
@@ -3808,7 +3777,6 @@ _log4sh_cleanup()
   fi
 
   unset _lc__oldTrap _lc__signal _lc__restoreTrap _lc__trap
-
   return
 }
 
@@ -3865,11 +3833,8 @@ for _log4sh_shellFlag in ${__LOG4SH_SHELL_FLAGS}; do
   echo ${__log4sh_oldShellFlags} |grep ${_log4sh_shellFlag} >/dev/null \
     || set +${_log4sh_shellFlag}
 done
-for _log4sh_shellFlag in ${__log4sh_oldShellFlags}
-do
-   [[ ${-/${_log4sh_shellFlag}} != ${__log4sh_oldShellFlags} ]] && set -${_log4sh_shellFlag}
-done
 unset _log4sh_shellFlag
+
 #/**
 # </s:shelldoc>
 #*/

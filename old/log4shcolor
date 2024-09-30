@@ -26,15 +26,6 @@
 # shell flags for log4sh:
 # u - treat unset variables as an error when performing parameter expansion
 __LOG4SH_SHELL_FLAGS='u'
-#
-# Johannes Ahrends
-# 2017-08-02 added Colorcoding
-#
-normal="\033[0m"
-green="\033[32m"
-yellow="\033[33m"
-red="\033[31m"
-blue="\033[34m"
 
 # save the current set of shell flags, and then set some for log4sh
 __log4sh_oldShellFlags=$-
@@ -42,10 +33,17 @@ for _log4sh_shellFlag in `echo -e "${__LOG4SH_SHELL_FLAGS}" |sed 's/\(.\)/\1 /g'
 do
   set -${_log4sh_shellFlag}
 done
+[[ ${-/x} != $- ]] && set +x
 
 #
 # constants
 #
+normal="\033[0m"
+green="\033[32m"
+yellow="\033[33m"
+red="\033[31m"
+blue="\033[34m"
+
 __LOG4SH_VERSION='1.4.2'
 
 __LOG4SH_TRUE=0
@@ -349,7 +347,7 @@ _log4sh_error()
 #*/
 _log4sh_fatal()
 {
-  echo -e "log4sh:${__LOG4SH_LEVEL_FATAL_STR} $@" >&2   
+  echo -e "log4sh:${__LOG4SH_LEVEL_FATAL_STR} $@" >&2
   [ -n "${LOG4SH_DEBUG_FILE:-}" ] \
     && _log4sh_log "${__LOG4SH_LEVEL_FATAL_STR}" "$@"
 }
@@ -408,7 +406,7 @@ _log4sh_mktempDir()
   }
 
   ${__LOG4SH_DEBUG} "created temporary directory (${_lmd_tmpDir})"
-  echo "${_lmd_tmpDir}"
+  echo -e "${_lmd_tmpDir}"
   unset _lmd_random _lmd_tmpDir _lmd_tmpPrefix
 }
 
@@ -530,7 +528,7 @@ log4sh_setAlternative()
       mail) ;;
       nc)
         lsa_cmdVers=`${lsa_cmdPath} --version 2>&1 |head -1`
-        if echo "${lsa_cmdVers}" |grep '^netcat' >/dev/null; then
+        if echo -e "${lsa_cmdVers}" |grep '^netcat' >/dev/null; then
           # GNU Netcat
           __log4sh_alternative_nc_opts='-c'
         else
@@ -593,8 +591,8 @@ log4sh_setAlternative()
 #*/
 _log4sh_findArrayElement()
 {
-  __pos=`echo "$1" |awk '$0==e{print NR}' e="$2"`
-  [ -n "${__pos}" ] && echo "${__pos}" || echo 0
+  __pos=`echo -e "$1" |awk '$0==e{print NR}' e="$2"`
+  [ -n "${__pos}" ] && echo -e "${__pos}" || echo -e 0
   unset __pos
 }
 
@@ -643,7 +641,7 @@ _log4sh_getArrayElement()
 
   shift ${_lgae_index}
   ${__LOG4SH_TRACE} "1='${1:-}' 2='${2:-}' 3='${3:-}' ..."
-  echo "$1"
+  echo -e "$1"
 
   unset _lgae_array _lgae_arraySize _lgae_index _lgae_oldIFS
   return ${__LOG4SH_TRUE}
@@ -673,7 +671,7 @@ _log4sh_getArrayLength()
   _oldIFS=${IFS} IFS=${__LOG4SH_IFS_ARRAY}
   set -- $1
   IFS=${_oldIFS} unset _oldIFS
-  echo $#
+  echo -e $#
 }
 
 #/**
@@ -699,7 +697,7 @@ _log4sh_getArrayLength()
 #*/
 _log4sh_setArrayElement()
 {
-  echo "$1" |awk '{if(NR==r){print e}else{print $0}}' r=$2 e="$3"
+  echo -e "$1" |awk '{if(NR==r){print e}else{print $0}}' r=$2 e="$3"
 }
 
 #/**
@@ -724,7 +722,7 @@ _log4sh_setArrayElement()
 #*/
 _log4sh_peekStack()
 {
-  echo "$@" |awk '{line=$0}END{print line}'
+  echo -e "$@" |awk '{line=$0}END{print line}'
 }
 
 #/**
@@ -752,7 +750,7 @@ _log4sh_popStack()
 {
   _array=$1
   _length=`_log4sh_getArrayLength "${_array}"`
-  echo "${_array}" |awk '{if(NR<r){print $0}}' r=${_length}
+  echo -e "${_array}" |awk '{if(NR<r){print $0}}' r=${_length}
   unset _array _length
 }
 
@@ -780,7 +778,7 @@ _log4sh_popStack()
 #*/
 _log4sh_pushStack()
 {
-  echo "${1:+$1${__LOG4SH_IFS_ARRAY}}$2"
+  echo -e "${1:+$1${__LOG4SH_IFS_ARRAY}}$2"
 }
 
 #=============================================================================
@@ -1015,7 +1013,7 @@ appender_getLevel()
       "${__log4shAppenderLevels}" ${agl_index}`
   __log4sh_return=$?
 
-  echo "${agl_level}"
+  echo -e "${agl_level}"
 
   unset agl_appender agl_index agl_level
   return ${__log4sh_return}
@@ -1221,13 +1219,13 @@ _appender_parsePattern()
   unset _oldIFS
 
   # escape any '\' and '&' chars in the message
-  _msg=`echo "${_msg}" |sed 's/\\\\/\\\\\\\\/g;s/&/\\\\&/g'`
+  _msg=`echo -e "${_msg}" |sed 's/\\\\/\\\\\\\\/g;s/&/\\\\&/g'`
 
   # deal with any newlines in the message
-  _msg=`echo "${_msg}" |tr '\n' ''`
+  _msg=`echo -e "${_msg}" |tr '\n' ''`
 
   # parse the pattern
-  _pattern=`echo "${_pattern}" |sed \
+  _pattern=`echo -e "${_pattern}" |sed \
     -e 's/%c/shell/g' \
     -e 's/%d{[^}]*}/%d/g' -e "s/%d/${_date}/g" \
     -e "s/%F/${__log4sh_filename}/g" \
@@ -1241,9 +1239,9 @@ _appender_parsePattern()
     -e 's/%%m/%%%m/g' -e 's/%%/%/g' \
     -e "s%m${_msg}" |tr '' '\n'`
   if [ ${_doEval} -eq ${__LOG4SH_FALSE} ]; then
-    echo "${_pattern}"
+    echo -e "${_pattern}"
   else
-    eval "echo \"${_pattern}\""
+    eval "echo -e \"${_pattern}\""
   fi
 
   unset _date _doEval _msg _pattern _tag
@@ -1490,13 +1488,13 @@ EOF
     ${__LOG4SH_LAYOUT_SIMPLE}|\
     ${__LOG4SH_LAYOUT_HTML})
       ${__LOG4SH_DEBUG} 'using simple/html layout'
-      echo "  _la_layout=\"\${_la_level} - \${_la_message}\""
+      echo -e "  _la_layout=\"\${_la_level} - \${_la_message}\""
       ;;
 
     ${__LOG4SH_LAYOUT_PATTERN})
       ${__LOG4SH_DEBUG} 'using pattern layout'
       _aa_pattern=`_appender_getPatternByIndex ${_aa_index}`
-      echo "  _la_layout=\`_appender_parsePattern '${_aa_pattern}' \${_la_level} \"\${_la_message}\"\`"
+      echo -e "  _la_layout=\`_appender_parsePattern '${_aa_pattern}' \${_la_level} \"\${_la_message}\"\`"
       ;;
   esac
 
@@ -1505,7 +1503,7 @@ EOF
   ${__LOG4SH_TRACE} "_aa_type='${_aa_type}'"
   case ${_aa_type} in
     ${__LOG4SH_TYPE_CONSOLE})
-      echo "  echo \"\${_la_layout}\""
+      echo -e "  echo -e \"\${_la_layout}\""
       ;;
 
     ${__LOG4SH_TYPE_FILE}|\
@@ -1514,7 +1512,7 @@ EOF
       _aa_file=`_appender_file_getFileByIndex ${_aa_index}`
       ${__LOG4SH_TRACE} "_aa_file='${_aa_file}'"
       if [ "${_aa_file}" = 'STDERR' ]; then
-        echo "  echo \"\${_la_layout}\" >&2"
+        echo -e "  echo -e \"\${_la_layout}\" >&2"
       elif [ "${_aa_file}" != "${__LOG4SH_NULL}" ]; then
         # do rotation
         case ${_aa_type} in
@@ -1550,7 +1548,7 @@ EOF
           ${__LOG4SH_TYPE_DAILY_ROLLING_FILE})
             ;;
         esac
-        echo "  echo \"\${_la_layout}\" >>'${_aa_file}'"
+        echo -e "  echo -e \"\${_la_layout}\" >>'${_aa_file}'"
       else
         # the file "${__LOG4SH_NULL}" is closed?? Why did we get here, and why
         # did I care when I wrote this bit of code?
@@ -1565,7 +1563,7 @@ EOF
       _aa_smtpSubject=`appender_smtp_getSubject ${_aa_appender}`
 
       cat <<EOF
-  echo "\${_la_layout}" |\\
+  echo -e "\${_la_layout}" |\\
       ${__log4sh_alternative_mail} -s "${_aa_smtpSubject}" ${_aa_smtpTo}
 EOF
       ;;
@@ -1635,10 +1633,10 @@ EOF
   _la_syslogMsg="<\${_la_priority}>\${_la_date} \${_la_hostname} \${_la_layout}"
 
   # do RFC 3164 cleanups
-  _la_date=\`echo \"\${_la_date}\" |sed 's/ 0\([0-9]\) /  \1 /'\`
-  _la_syslogMsg=\`echo "\${_la_syslogMsg}" |cut -b1-1024\`
+  _la_date=\`echo -e \"\${_la_date}\" |sed 's/ 0\([0-9]\) /  \1 /'\`
+  _la_syslogMsg=\`echo -e "\${_la_syslogMsg}" |cut -b1-1024\`
 
-  ( echo "\${_la_syslogMsg}" |\
+  ( echo -e "\${_la_syslogMsg}" |\
       exec ${__log4sh_alternative_nc} ${__log4sh_alternative_nc_opts} -w 1 -u \
           ${_aa_syslogHost} 514 )
   unset _la_tag _la_priority _la_date _la_hostname _la_syslogMsg
@@ -2106,7 +2104,7 @@ appender_smtp_getTo()
   __log4sh_return=$?
 
   [ "${asgt_to}" = "${__LOG4SH_NULL}" ] && asgt_to=''
-  echo "${asgt_to}"
+  echo -e "${asgt_to}"
 
   unset asgt_appender asgt_index asgt_to
   return ${__log4sh_return}
@@ -2216,7 +2214,7 @@ appender_smtp_getSubject()
   __log4sh_return=$?
 
   [ "${asgs_subject}" = "${__LOG4SH_NULL}" ] && asgs_subject=''
-  echo "${asgs_subject}"
+  echo -e "${asgs_subject}"
 
   unset asgs_appender asgs_index asgs_subject
   return ${__log4sh_return}
@@ -2423,7 +2421,7 @@ appender_syslog_setFacility()
   assf_facility=$2
 
   # check for valid facility
-  echo "${__LOG4SH_TYPE_SYSLOG_FACILITY_NAMES}" |grep " ${assf_facility} " >/dev/null
+  echo -e "${__LOG4SH_TYPE_SYSLOG_FACILITY_NAMES}" |grep " ${assf_facility} " >/dev/null
   if [ $? -ne 0 ]; then
     # the facility is not valid
     _log4sh_error "[${assf_facility}] is an unknown syslog facility. Defaulting to [user]."
@@ -2509,7 +2507,7 @@ appender_syslog_getHost()
   __log4sh_return=$?
 
   [ "${asgh_host}" = "${__LOG4SH_NULL}" ] && asgh_host=''
-  echo "${asgh_host}"
+  echo -e "${asgh_host}"
 
   unset asgh_appender asgh_index asgh_host
   return ${__log4sh_return}
@@ -2613,7 +2611,7 @@ logger_level_toLevel()
     *) _ltl__return=${__LOG4SH_FALSE} ;;
   esac
 
-  echo ${_ltl__level}
+  echo -e ${_ltl__level}
   unset _ltl__val _ltl__level
   return ${_ltl__return}
 }
@@ -2657,7 +2655,7 @@ logger_level_toInt()
     *) _lti__return=${__LOG4SH_FALSE} ;;
   esac
 
-  echo ${_lti__int}
+  echo -e ${_lti__int}
   unset _lti__int _lti__level
   return ${_lti__return}
 }
@@ -2783,7 +2781,7 @@ logger_addAppenderWithPattern()
 #*/
 logger_getFilename()
 {
-  echo "${__log4sh_filename}"
+  echo -e "${__log4sh_filename}"
 }
 
 #/**
@@ -2896,6 +2894,8 @@ log()
   # if no message was passed, read it from STDIN
   [ $# -ne 0 ] && _l_msg="$@" || _l_msg=`cat`
 
+  [[ ${-/x} != $- ]] && set +x
+
   __log4sh_return=${__LOG4SH_TRUE}
   _l_levelInt=`logger_level_toInt ${_l_level}`
   if [ $? -eq ${__LOG4SH_TRUE} ]; then
@@ -2930,6 +2930,11 @@ log()
 
   unset _l_msg _l_oldIFS _l_level _l_levelInt
   unset _l_appenderIndex _l_appenderLevel _l_appenderLevelInt _l_appenderName
+
+  for _log4sh_shellFlag in ${__log4sh_oldShellFlags}
+  do
+     [[ ${-/${_log4sh_shellFlag}} != ${__log4sh_oldShellFlags} ]] && set -${_log4sh_shellFlag}
+  done
   return ${__log4sh_return}
 }
 
@@ -2955,7 +2960,7 @@ log()
 #*/
 logger_trace()
 {
-  log ${__LOG4SH_LEVEL_TRACE_STR} "$@${normal}"
+  log ${__LOG4SH_LEVEL_TRACE_STR} "$@"
 }
 
 #/**
@@ -3115,7 +3120,7 @@ _log4sh_getPropPrefix()
   _oldIFS=${IFS} IFS='.'
   set -- $1
   IFS=${_oldIFS} unset _oldIFS
-  echo $1
+  echo -e $1
 }
 
 #/**
@@ -3269,7 +3274,7 @@ _log4sh_propAppender()
       # FileAppender
       DatePattern) ;;  # unsupported
       File)
-        _lpa_value=`eval echo "${_lpa_value}"`
+        _lpa_value=`eval echo -e "${_lpa_value}"`
         appender_file_setFile ${_lpa_appender} "${_lpa_value}"
         ;;
       MaxBackupIndex)
@@ -3336,7 +3341,7 @@ _log4sh_propAppender()
 _log4sh_propLogger()
 {
   _prop=`_log4sh_stripPropPrefix $1`
-  echo "logger: ${_prop} $2"
+  echo -e "logger: ${_prop} $2"
   unset _prop
 }
 
@@ -3373,11 +3378,11 @@ _log4sh_propLogger()
 #*/
 _log4sh_propRootLogger()
 {
-  __lprl_rootLogger=`echo "$@" |sed 's/ *, */,/g'`
-  __lprl_count=`echo "${__lprl_rootLogger}" |sed 's/,/ /g' |wc -w`
+  __lprl_rootLogger=`echo -e "$@" |sed 's/ *, */,/g'`
+  __lprl_count=`echo -e "${__lprl_rootLogger}" |sed 's/,/ /g' |wc -w`
   __lprl_index=1
   while [ ${__lprl_index} -le ${__lprl_count} ]; do
-    __lprl_operand=`echo "${__lprl_rootLogger}" |cut -d, -f${__lprl_index}`
+    __lprl_operand=`echo -e "${__lprl_rootLogger}" |cut -d, -f${__lprl_index}`
     if [ ${__lprl_index} -eq 1 ]; then
       logger_setLevel "${__lprl_operand}"
     else
@@ -3570,7 +3575,7 @@ log4sh_resetConfiguration()
 #*/
 logger_getThreadName()
 {
-  echo ${__log4sh_threadName}
+  echo -e ${__log4sh_threadName}
 }
 
 #/**
@@ -3669,7 +3674,7 @@ logger_popThreadName()
     __log4sh_threadStack=`_log4sh_popStack "$__log4sh_threadStack"`
     __log4sh_threadName=`_log4sh_peekStack "$__log4sh_threadStack"`
   else
-    echo 'log4sh:WARN no more thread names available on thread name stack.' >&2
+    echo -e 'log4sh:WARN no more thread names available on thread name stack.' >&2
   fi
 }
 
@@ -3746,14 +3751,14 @@ _log4sh_cleanup()
   # do we possibly need to restore a previous trap?
   if [ -r "${__log4sh_trapsFile}" -a -s "${__log4sh_trapsFile}" ]; then
     # yes. figure out what we need to do
-    if [ `grep "^trap -- " "${__log4sh_trapsFile}" >/dev/null; echo $?` -eq 0 ]
+    if [ `grep "^trap -- " "${__log4sh_trapsFile}" >/dev/null; echo -e $?` -eq 0 ]
     then
       # newer trap command
       ${__LOG4SH_DEBUG} 'newer POSIX trap command'
       _lc__restoreTrap=${__LOG4SH_TRUE}
       _lc__oldTrap=`egrep "(${_lc__trap}|${_lc__signal})$" "${__log4sh_trapsFile}" |\
         sed "s/^trap -- '\(.*\)' [A-Z]*$/\1/"`
-    elif [ `grep "[0-9]*: " "${__log4sh_trapsFile}" >/dev/null; echo $?` -eq 0 ]
+    elif [ `grep "[0-9]*: " "${__log4sh_trapsFile}" >/dev/null; echo -e $?` -eq 0 ]
     then
       # older trap command
       ${__LOG4SH_DEBUG} 'older style trap command'
@@ -3839,7 +3844,7 @@ fi
 
 # restore the previous set of shell flags
 for _log4sh_shellFlag in ${__LOG4SH_SHELL_FLAGS}; do
-  echo ${__log4sh_oldShellFlags} |grep ${_log4sh_shellFlag} >/dev/null \
+  echo -e ${__log4sh_oldShellFlags} |grep ${_log4sh_shellFlag} >/dev/null \
     || set +${_log4sh_shellFlag}
 done
 unset _log4sh_shellFlag

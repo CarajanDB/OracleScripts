@@ -1,0 +1,6 @@
+CDBSCRIPTDIR="${CDBSCRIPTDIR:-/home/oracle/bin}"
+source ${CDBSCRIPTDIR}/CDBlib
+Logger
+logger_debug "debug"
+logger_info "hallo"
+logger_error "error"
