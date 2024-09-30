@@ -1,0 +1,457 @@
+#!/bin/ksh
+# @(#) ================================================================================================================
+# @(#) File        : ORAr2iRunDIP
+# @(#) Author      : Dieter Smets
+# @(#) Modified    :
+# @(#)
+# @(#) Description : This script executes following Steps of the Refresh_2_I Process
+# @(#)               - (D) drop target schema, save Password if exists
+# @(#)               - (I) Datapump import
+# @(#)               - (P) Postprocessing, e.g. Grants. Create synonyms
+# @(#)               - (s) Execute Schema Specials, e.g. restore saved Tabels
+# @(#)
+# @(#) Parameters  : - Szenario Name of Process
+# @(#)               - Oracle Database Name, e.g. PSHP
+# @(#)
+# @(#) Version     : 0.7
+# @(#) Datum       : 09.04.2024
+# @(#)
+# @(#) Presumption :
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)  0.1  2023-08-02  Smets       Created
+# @@(#)  0.2  2023-08-11  Smets       Changed sql sripts folder
+# @@(#)  0.3  2023-08-29  Smets       Enable special Import Parameters on Schema Level
+# @@(#)                               Include Schema Specials
+# @@(#)                               alter system set job_queue_processes=0 during Import (ORA-00054)
+# @@(#)  0.4  2023-08-31  Smets       Support of new Control Table/View Structures
+# @@(#)  0.5  2023-09-05  Smets       Support Script Restart by DONE Flags
+# @@(#)  0.6  2023-10-05  Smets       Support of special Postproc File (TADBA-5439)
+# @@(#)  0.7  2024-04-09  MPils       Added "" for Oracle Password
+# @(#) ================================================================================================================
+
+R2IDIR=/oranfs/share/ora_admin/DataPump/r2i
+
+SZENARIO=$1
+SZENARIO=$( echo "$SZENARIO" | tr '[:upper:]' '[:lower:]' )
+SRC_DBNAME=$2
+SRC_DBNAME=$( echo "$SRC_DBNAME" | tr '[:lower:]' '[:upper:]' )
+
+#rm -f ${R2IDIR}/szenario_imp_logs/*.*   # remove existing IMPDP-Logs
+#echo ${R2IDIR}/szenario_imp_logs/
+
+cd ${R2IDIR}/${SZENARIO}
+RC=0
+
+#########################################################################################################
+# Get BVBTCUSR Password from PasswordFile:
+#########################################################################################################
+
+XONOFF=$(set -o | awk '/^xtrace/ {print $2}')             # xtrace Zustand sichern
+PWDDIR=/app/oracle/admin/etc/pwddir
+DBAUSER=BVBTCUSR
+set +x                                                    # xtrace wg. Password ausschalten
+source $PWDDIR/.pwdfile_db_bvbtcusr
+DBAPASS=${PWDBVBTCUSR}
+if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+
+#########################################################################################################
+# Get oid/schema/target_stage/{Init_Flags} from Refresh-Szenario View: -----------------------------------
+#########################################################################################################
+
+TMPFILE=/tmp/$(basename $0)${SRC_DBNAME}$(date +%Y%m%d%H%M%S)
+set +x                                                    # xtrace wg. Password ausschalten
+echo "Suppressed: sqlplus -s ${DBAUSER}/XXXXXXXX@DBA-P"
+(
+sqlplus -s ${DBAUSER}/"${DBAPASS}"@DBA-P <<EOSQL
+  set pagesize 0
+  set FEEDBACK OFF;
+  select trim(R.TARGET_OID_SERVICE)||'/'||
+         trim(upper(TARGET_STAGE))||'/'||
+         trim(R.SCHEMA_NAME)||'/'||
+         trim(R.INIT_DROPUSER_DONE)||'/'||
+         trim(R.INIT_IMPORT_DONE)||'/'||
+         trim(R.INIT_POSTPROC_DONE)
+    from BVDBS.R2I_IMPORT_BY_DBNAME_LIST R
+   where R.SZENARIO              LIKE '${SZENARIO}%'
+     and UPPER(R.SOURCE_DBNAME)  =    '${SRC_DBNAME}'
+  ;
+EOSQL
+) > $TMPFILE
+if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+SQLOUT=$(cat $TMPFILE|tr -d '\n')
+if [ -s ${SQLOUT} ]
+   then
+      echo "Ausfuehrung beendet - ${SRC_DBNAME} fuer ${SZENARIO} nicht relevant! RC=0 gesetzt. "
+      RC=0
+      rm $TMPFILE
+      exit $RC
+fi
+
+while read R2I_LIST; do
+##########################################################################################################
+#
+# Store Control Table Entries into Variables:
+#
+##########################################################################################################
+  TRG_TNS=`echo $R2I_LIST|cut -d '/' -f 1`
+  TARGET_STAGE=`echo $R2I_LIST|cut -d '/' -f 2`
+  SCHEMA=`echo $R2I_LIST|cut -d '/' -f 3`
+  INIT_DROPUSER_DONE=`echo $R2I_LIST|cut -d '/' -f 4`
+  INIT_IMPORT_DONE=`echo $R2I_LIST|cut -d '/' -f 5`
+  INIT_POSTPROC_DONE=`echo $R2I_LIST|cut -d '/' -f 6`
+##########################################################################################################
+#
+# Save Tables before DROP USER if requested via Files: 1_savetable_<DB NAME>_<SCHEMA>
+#
+##########################################################################################################
+
+  echo $TRG_TNS
+  echo $SCHEMA
+  echo ${INIT_DROPUSER_DONE}
+
+  EXECFILE=1_savetable_${SRC_DBNAME}_${SCHEMA}.sql
+  if [ -f "${EXECFILE}" ]; then
+     SYSOUT=./logs/${EXECFILE}.sysout
+     if [ ${INIT_DROPUSER_DONE} == 'N' ]
+     then
+       rm -f ${SYSOUT}
+     fi
+
+     set +x                                                    # xtrace wg. Password ausschalten
+     echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@${TRG_TNS}"
+     sqlplus /nolog <<EOT >> ${SYSOUT} 2>&1
+     connect ${DBAUSER}/"${DBAPASS}"@${TRG_TNS}
+     whenever sqlerror exit failure commit;
+     whenever oserror continue ;
+     set echo on;
+     set LONGCHUNKSIZE 30000 LONG 30000 PAGESIZE 0 LINESIZE 512
+     start ${EXECFILE} ${SCHEMA} ${INIT_DROPUSER_DONE};
+     quit;
+EOT
+     RC=$?
+     if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+     if [ $RC -ne 0 ]
+        then
+          echo "*************************************************************"
+          echo "* Fehler bei SQL Ausfuehrung! Skript: ${EXECFILE}"
+          echo "* Siehe ${SYSOUT}"
+          echo "* RC=$RC"
+          echo "*************************************************************"
+          RC=1
+          exit ${RC}
+     fi
+  fi
+##########################################################################################################
+# Save PASSWORD Hashes if USER has a Password and DROP USER
+##########################################################################################################
+#  EXECFILE=2_dropuser_${SRC_DBNAME}_${SCHEMA}.sql
+  SYSOUT=./logs/2_dropuser_${SRC_DBNAME}_${SCHEMA}.sysout
+  if [ ${INIT_DROPUSER_DONE} == 'N' ]
+  then
+    rm -f ${SYSOUT}
+  fi
+
+  set +x                                                    # xtrace wg. Password ausschalten
+  echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@${TRG_TNS}"
+  sqlplus /nolog <<EOT > ${SYSOUT} 2>&1
+  connect ${DBAUSER}/"${DBAPASS}"@${TRG_TNS}
+  whenever sqlerror exit failure commit;
+  set LONGCHUNKSIZE 30000 LONG 30000 PAGESIZE 0 LINESIZE 512;
+  set echo on;
+  start ../sql_scripts/r2i_user_pwd_and_drop.sql ${SCHEMA} ${INIT_DROPUSER_DONE} ${INIT_IMPORT_DONE};
+--  start ../sql_scripts/r2i_user_pwd_and_drop_test.sql ${SCHEMA} ${INIT_DROPUSER_DONE} ${INIT_IMPORT_DONE};
+  quit;
+EOT
+  RC=$?
+  if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+  if [ $RC -ne 0 ]
+     then
+       echo "*************************************************************"
+       echo "* Fehler bei SQL Ausfuehrung!"
+       echo "* Siehe ${SYSOUT}"
+       echo "* RC=$RC"
+       echo "*************************************************************"
+       RC=1
+       exit ${RC}
+  fi
+# #
+# #Vor dem DROP USER wurden die Password Hashes gespeichert, falls der User ein Password hatte.
+# #Die passenden ALTER USER Statements werden hier in ein separates File gschrieben und kuennen so nach dem Import wieder auf den urspr. Wert gesetzt werden
+# #
+  PWDFILE=generated_files/3_pwdfile_${SRC_DBNAME}_${SCHEMA}.sql
+  grep '*Refresh2I-Reset-PWD*' ${SYSOUT}|sed 's/$/;/' >${PWDFILE}
+
+#   If Schema does not have a Password, then remove the SQL-File:
+  grep 'IDENTIFIED EXTERNALLY' ${PWDFILE}
+  RC=$?
+  if [ $RC -eq 0 ]; then
+     rm ${PWDFILE}
+  fi
+# #
+# #Set Initial_Drop_User_Done Flag in Refresh Table:
+# #
+
+#echo ${SZENARIO}
+#echo ${SRC_DBNAME}
+#echo ${SCHEMA}
+
+  set +x                                                    # xtrace wg. Password ausschalten
+  echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@DBA-P"
+  sqlplus /nolog <<EOT >> ${SYSOUT} 2>&1
+  connect ${DBAUSER}/"${DBAPASS}"@DBA-P
+  whenever sqlerror exit failure commit;
+  set echo on;
+  UPDATE BVDBS.R2I_SCHEMA_LIST RS
+     SET RS.INIT_DROPUSER_DONE = 'Y'
+   where RS.SZENARIO             = '${SZENARIO}'
+     and upper(RS.SOURCE_DBNAME) = '${SRC_DBNAME}'
+     and RS.SCHEMA_NAME          = '${SCHEMA}'
+  ;
+  quit;
+EOT
+  RC=$?
+  if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+  if [ $RC -ne 0 ]
+     then
+       echo "*************************************************************"
+       echo "* Fehler bei SQL Ausfuehrung!"
+       echo "* Siehe ${SYSOUT}"
+       echo "* RC=$RC"
+       echo "*************************************************************"
+       RC=1
+       exit ${RC}
+  fi
+
+##########################################################################################################
+#
+# Run Datapump Import from generated Parm Files
+#
+##########################################################################################################
+
+  echo "IMPORT: "${DBAUSER}
+  echo "IMPORT: "${TRG_TNS}
+  echo "IMPORT: "${SRC_DBNAME}
+  echo "IMPORT: "${SCHEMA}
+  echo "IMPORT: "${INIT_IMPORT_DONE}
+
+if [ ${INIT_IMPORT_DONE} == 'N' ]
+  then
+
+# Suppress Jobs, e.g. Statistics, during Import Processing:
+    set +x                                                    # xtrace wg. Password ausschalten
+    echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@DBA-P"
+    sqlplus /nolog <<EOT >> ${SYSOUT} 2>&1
+    connect ${DBAUSER}/"${DBAPASS}"@DBA-P
+    alter system set job_queue_processes=0;
+    quit;
+EOT
+    if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+
+
+#    If there do exist special Import Parameters, concat them with the generated Parameters from Export:
+    if [ -f "${R2IDIR}/${SZENARIO}/2_importadd_${SRC_DBNAME}_${SCHEMA}.impdp" ]; then
+       cat ${R2IDIR}/impdp/${SRC_DBNAME}_${SCHEMA}.impdp ${R2IDIR}/${SZENARIO}/2_importadd_${SRC_DBNAME}_${SCHEMA}.impdp >/tmp/${SRC_DBNAME}_${SCHEMA}.impdp
+    else
+       cat ${R2IDIR}/impdp/${SRC_DBNAME}_${SCHEMA}.impdp >/tmp/${SRC_DBNAME}_${SCHEMA}.impdp
+    fi
+
+    set +x                                                    # xtrace wg. Password ausschalten
+    echo "impdp ${DBAUSER}/XXXXXXX@${TRG_TNS} parfile=/tmp/${SRC_DBNAME}_${SCHEMA}.impdp"
+    impdp ${DBAUSER}/${DBAPASS}@${TRG_TNS} parfile=/tmp/${SRC_DBNAME}_${SCHEMA}.impdp
+    RC=$?
+    if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+
+# Enable Jobs suppressed before:
+    set +x                                                    # xtrace wg. Password ausschalten
+    echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@DBA-P"
+    sqlplus /nolog <<EOT >> ${SYSOUT} 2>&1
+    connect ${DBAUSER}/"${DBAPASS}"@DBA-P
+    alter system set job_queue_processes=40;
+    quit;
+EOT
+    if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+
+    if [ $RC -ne 0 ]
+       then
+         echo "*****************************************************************************************************"
+         echo "* Fehler bei IMPORT Schema!"
+         echo "* Siehe implogs folder for Import-Log File"
+         echo "* RC=$RC"
+         echo "*"
+         echo "* Sollte der IMPORT mit einem Fehler geendet sein, der ignoriert werden kann,"
+         echo "*        dann den entsprechenden INIT_IMPORT_DONE Wert in Control-Table auf Y setzen"
+         echo "*        und den Job in Control-M mit RERUN wieder aufsetzen."
+         echo "* Sollte der Fehler nicht zu ignorieren sein, die Fehlerursache ermitteln und ggfs. korrigieren,"
+         echo "*        dann den Job in Control-M mit RERUN wieder aufsetzen."
+         echo "*"
+         echo "****************************************************************************************************"
+         RC=1
+         exit ${RC}
+    fi
+
+    set +x                                                    # xtrace wg. Password ausschalten
+    echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@DBA-P"
+    sqlplus /nolog <<EOT >> ${SYSOUT} 2>&1
+    connect ${DBAUSER}/"${DBAPASS}"@DBA-P
+    whenever sqlerror exit failure commit;
+    set echo on;
+    UPDATE BVDBS.R2I_SCHEMA_LIST RS
+       SET RS.INIT_IMPORT_DONE = 'Y'
+     where RS.SZENARIO             = '${SZENARIO}'
+       and upper(RS.SOURCE_DBNAME) = '${SRC_DBNAME}'
+       and RS.SCHEMA_NAME          = '${SCHEMA}'
+    ;
+    quit;
+EOT
+    RC=$?
+    if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+    if [ $RC -ne 0 ]
+       then
+         echo "*************************************************************"
+         echo "* Fehler bei SQL Ausfuehrung!"
+         echo "* Siehe ${SYSOUT}"
+         echo "* RC=$RC"
+         echo "*************************************************************"
+         RC=1
+         exit ${RC}
+    fi
+  fi
+##########################################################################################################
+#
+# Run Schema specific Postprocessing, Statistics and reset saved Passwords
+#
+##########################################################################################################
+
+  echo "POSTPROC: "${DBAUSER}
+  echo "POSTPROC: "${TRG_TNS}
+  echo "POSTPROC: "${SRC_DBNAME}
+  echo "POSTPROC: "${SCHEMA}
+  echo "POSTPROC: "${INIT_POSTPROC_DONE}
+
+  POSTPROC_DIR=/oranfs/share/ora_admin/DDLdeploy_postproc
+  ALT_POSTPROC_FILE=4_postproc_${SRC_DBNAME}_${SCHEMA}
+  POSTPROC_FILE=${SCHEMA}.postproc
+  if [ -f ./${ALT_POSTPROC_FILE} ]; then
+     POSTPROC_FILE=`grep '\.postproc' ${ALT_POSTPROC_FILE}`
+     if [ ${POSTPROC_FILE}x == 'x' ]; then
+        POSTPROC_FILE=${SCHEMA}.postproc
+     fi
+  fi
+  EXECFILE=${POSTPROC_DIR}/${POSTPROC_FILE}
+
+  SYSOUT=./logs/4_postproc_${SRC_DBNAME}_${SCHEMA}.sysout
+  set +x                                                    # xtrace wg. Password ausschalten
+  echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@${TRG_TNS}"
+  sqlplus /nolog <<EOT > ${SYSOUT} 2>&1
+  connect ${DBAUSER}/"${DBAPASS}"@${TRG_TNS}
+  whenever sqlerror exit failure commit;
+  whenever oserror exit failure commit;
+  set echo on;
+  @${EXECFILE} ${TARGET_STAGE}
+  exec dbms_stats.gather_schema_stats(ownname=>'${SCHEMA}',estimate_percent=>1,block_sample=>TRUE,degree=>4);
+  whenever oserror continue ;
+  @./${PWDFILE}
+  quit;
+EOT
+  RC=$?
+  if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+  if [ $RC -ne 0 ]
+     then
+       echo "*************************************************************"
+       echo "* Fehler bei SQL Ausfuehrung!"
+       echo "* Siehe ${SYSOUT}"
+       echo "* RC=$RC"
+       echo "*************************************************************"
+       RC=1
+       exit ${RC}
+  fi
+
+  set +x                                                    # xtrace wg. Password ausschalten
+  echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@DBA-P"
+  sqlplus /nolog <<EOT >> ${SYSOUT} 2>&1
+  connect ${DBAUSER}/"${DBAPASS}"@DBA-P
+  whenever sqlerror exit failure commit;
+  set echo on;
+  UPDATE BVDBS.R2I_SCHEMA_LIST RS
+     SET RS.INIT_POSTPROC_DONE = 'Y'
+   where RS.SZENARIO             = '${SZENARIO}'
+     and upper(RS.SOURCE_DBNAME) = '${SRC_DBNAME}'
+     and RS.SCHEMA_NAME          = '${SCHEMA}'
+  ;
+  quit;
+EOT
+  RC=$?
+  if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+  if [ $RC -ne 0 ]
+     then
+       echo "*************************************************************"
+       echo "* Fehler bei SQL Ausfuehrung!"
+       echo "* Siehe ${SYSOUT}"
+       echo "* RC=$RC"
+       echo "*************************************************************"
+       RC=1
+       exit ${RC}
+  fi
+
+#
+done <${TMPFILE}
+
+while read R2I_LIST; do
+#########################################################################################################
+#   Das folgende "Specials" Prcessing lueuft in einer neuer Schleife separat fuer jedes Schema, da
+#   hier z.T. Aktionen ausgefuehrt werden, wozu alle Schemata in der Gruppe existieren muessen.
+#   Beispiel: Im Schema BVEKBADM existieren Trigger ins Schema BVEKBADM_DWH. Beim Import des 1. Schemas
+#   laufen diese Trigger auf einen Compile-Fehler. Erst nach Import des DWH Schemas laufen diese ok.
+#########################################################################################################
+
+  TRG_TNS=`echo $R2I_LIST|cut -d '/' -f 1`
+  TARGET_STAGE=`echo $R2I_LIST|cut -d '/' -f 2`
+  SCHEMA=`echo $R2I_LIST|cut -d '/' -f 3`
+  INIT_DROPUSER_DONE=`echo $R2I_LIST|cut -d '/' -f 4`
+  INIT_IMPORT_DONE=`echo $R2I_LIST|cut -d '/' -f 5`
+  INIT_POSTPROC_DONE=`echo $R2I_LIST|cut -d '/' -f 6`
+
+#########################################################################################################
+# Run Schema specific Special Processing, e.g. restore saved Tables, Recompile Triggers#
+#########################################################################################################
+
+  echo "SPECIALS: "${DBAUSER}
+  echo "SPECIALS: "${TRG_TNS}
+  echo "SPECIALS: "${TARGET_STAGE}
+  echo "SPECIALS: "${SCHEMA}
+
+  EXECFILE=5_specials_${SRC_DBNAME}_${SCHEMA}.sql
+  if [ -f "${EXECFILE}" ]; then
+     SYSOUT=./logs/${EXECFILE}.sysout
+
+     set +x                                                    # xtrace wg. Password ausschalten
+     echo "Suppressed: sqlplus /nolog connect ${DBAUSER}/XXXXXXXX@${TRG_TNS}"
+     sqlplus /nolog <<EOT >> ${SYSOUT} 2>&1
+     connect ${DBAUSER}/"${DBAPASS}"@${TRG_TNS}
+     whenever sqlerror exit failure commit;
+     whenever oserror continue ;
+     set echo on;
+     start ${EXECFILE} ${SCHEMA} ${TARGET_STAGE};
+     quit;
+EOT
+     RC=$?
+     if [ $XONOFF == "on" ] ; then set -x ; else set +x ; fi   # xtrace Zustand wiederherstellen
+     if [ $RC -ne 0 ]
+        then
+          echo "*************************************************************"
+          echo "* Fehler bei SQL Ausfuehrung! Skript: ${EXECFILE}"
+          echo "* Siehe ${SYSOUT}"
+          echo "* RC=$RC"
+          echo "*************************************************************"
+          RC=1
+          exit ${RC}
+     fi
+  fi
+
+done <${TMPFILE}
+
+rm $TMPFILE
+
+exit

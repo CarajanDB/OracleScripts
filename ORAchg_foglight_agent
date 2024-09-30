@@ -1,0 +1,184 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#) File        : ORAchg_foglight_agent
+# @(#) Author      : Marcel Pils
+# @(#) Modified    :
+# @(#)
+# @(#) Description : Script API to manage foglight agent for Oracle databases
+# @(#)
+# @(#) Version     : 1.0
+# @(#) Date        : 28.10.2016
+# @(#)
+# @(#) Attention   : This script must be started as user ORACLE!
+# @(#)
+# @@(#) Change History:
+# @@(#)
+# @@(#) 1.0  28.10.2016  Pils   Created
+# @@(#)
+# @(#) ================================================================================================================
+#set -x
+#set +x      #needed to hide passwords in shell variables from "set -x" bash execution (e.g. ControlM Logfile)
+
+#exit 0
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+#MAILTO="unix-dba@barmenia.de"
+#HOST=`hostname -s`
+#LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Manage foglight agent for Oracle databases"
+BINDIR="/app/oracle/bin"
+PWDDIR="/oranfs/share/ora_admin/SYSTEM/pwddir"
+
+
+WHAT="$BINDIR/what"
+SCRIPTVERSION="`$WHAT $BINDIR/$SCRIPTNAME|grep 'Version     :'|awk '{print $3,$4,$5}'`"
+SCRIPTDATE="`$WHAT $BINDIR/$SCRIPTNAME|grep 'Date        :'|awk '{print $3,$4,$5}'`"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : ${SCRIPTNAME}"
+echo ""
+echo "  Parameters  : -a|-action [listagents|startagent|stopagent|chgpwd] script options"
+echo "                -o|-objectfilter            regexpr foglight agent target filter (Default: .*)"
+echo "                -p|-password                password (Default: content from pwdfile in oranfs)"
+echo "                -u|-foglightumgebung [P|T]  Foglight Umgebung"
+echo "                -h,                 help screen"
+echo ""
+echo "  Example     : ${SCRIPTNAME} -a chgpwd -o 'DBAT_S1\.unix\.lan' -u T"
+echo "              : ${SCRIPTNAME} -a chgpwd -o 'DBAT_S1.*'i -u T"
+echo "                ${SCRIPTNAME} -a startagent -o 'lxcp3\.barmenia\.lan-DBAT_S1' -u T"
+echo "                ${SCRIPTNAME} -a stopagent -o '.*DBAT.*' -u T"
+echo "                ${SCRIPTNAME} -a listagents -o '.*' -u T"
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+echo "              : Please mind the '\"' around parameter values!"
+echo "              : Grep syntax use '.*' as 'any string' wildcard!"
+exit 1 
+}
+
+#
+#-----------------------------------------------------------------------
+# Logger Script
+#-----------------------------------------------------------------------
+#
+load_logger() {
+if [ -r $BINDIR/log4sh ]
+then
+   LOCALLOGGER="`basename $0 | cut -d"." -f 1`_log4sh.properties"
+   if [ -r $BINDIR/${LOCALLOGGER} ]
+   then
+      LOG4SH_CONFIGURATION=$BINDIR/$LOCALLOGGER . $BINDIR/log4sh
+   else
+      LOG4SH_CONFIGURATION=$BINDIR/log4sh.properties . $BINDIR/log4sh
+   fi
+else
+   echo "ERROR: could not load (log4sh)" >&2
+   exit 1
+fi
+#  echo "LOG4SH_CONFIGURATION:$LOG4SH_CONFIGURATION"
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Set Environment
+#-----------------------------------------------------------------------------------------------------------------
+SSH_CMD='ssh -q -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3'
+FOG_CMD='/app/QuestSoftware/Foglight/bin/fglcmd.sh -srv localhost -port 8080 -usr CmdbExport -pwd Exp1Cmdb'
+FOG_ORA_DIR='/app/QuestSoftware/Foglight/Oracle_Cli'
+FOG_SCRIPT="${FOG_ORA_DIR}/orachange.sh"
+FOG_TEST="quest@sysmgt14"
+FOG_PROD="quest@sysmgt04"
+load_logger
+logger_info "$SCRIPTVERSION"
+logger_info "$SCRIPTDATE"
+logger_info "$SCRIPTNAME gestartet"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  logger_error "Script may not run as user `id -un`, it must be started and run as oracle"
+  RC=255
+  logger_error "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+while true; do
+  case "$1" in
+    -a|-action ) ACTION=`echo ${2}|tr [:upper:] [:lower:]`;action=1; shift 2 ;;
+    -o|-objectfilter ) OBJECTFILTER="$2";objectfilter=1; shift 2 ;;
+    -p|-password ) PASSWORD="$2";password=1; shift 2 ;;
+    -u|-foglightumgebung ) FOGLIGHTUMGEBUNG="$2";foglightumgebung=1; shift 2 ;;
+    -h | --help ) usage ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+
+if [ "$password" = "1" ]; then
+  PWDPAOMON=$PASSWORD
+else
+  source $PWDDIR/.pwdfile_db_paomon
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the option
+#-----------------------------------------------------------------------------------------------------------------
+if [ "${ACTION}" = "chgpwd" ] && [ "x" = "x$PWDPAOMON" ]; then
+  logger_error "parameter -action = chgpwd but no password found for paomon -> execution canceled"; echo ""; usage
+fi
+if [ "x${foglightumgebung}" = "x" ]; then
+  logger_error "parameter -foglightumgebung not defined -> execution canceled"; echo ""; usage
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+
+case "$FOGLIGHTUMGEBUNG" in 
+  t|T ) REMHOST=$FOG_TEST ;;
+  p|P ) REMHOST=$FOG_PROD ;;
+  * )   logger_error "wrong value '$FOGLIGHTUMGEBUNG' for paramter -foglightumgebung!"; echo ""; usage ;;
+esac
+
+case "$ACTION" in
+  chgpwd ) 
+      echo "#running: $SSH_CMD $REMHOST \" $FOG_SCRIPT '${ACTION}' '${OBJECTFILTER}' '<new-password>'\""
+      $SSH_CMD $REMHOST "$FOG_SCRIPT '${ACTION}' '${OBJECTFILTER}' '${PWDPAOMON}'"
+      RETCODE=$?
+      ;;
+  startagent | stopagent )
+      echo "#running: $SSH_CMD $REMHOST \"$FOG_SCRIPT '${ACTION}' '${OBJECTFILTER}'\""
+      $SSH_CMD $REMHOST "$FOG_SCRIPT '${ACTION}' '${OBJECTFILTER}'"
+      RETCODE=$?
+      ;;
+  listagents )
+      echo "#running: $SSH_CMD $REMHOST \"$FOG_SCRIPT '${ACTION}' '${OBJECTFILTER}'\""
+      $SSH_CMD $REMHOST "$FOG_SCRIPT '${ACTION}' '${OBJECTFILTER}'"
+      RETCODE=$?
+      ;;
+  * ) 
+      echo "ERROR: invalid action '${ACTION}'!"; usage
+      ;;
+esac
+
+if [ $RETCODE -ne 0 ]; then
+  logger_error "operation failed (RC: $RETCODE)!"
+else
+  logger_info "operation succeeded."
+fi
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+logger_info "Ende"
+exit $RETCODE
+

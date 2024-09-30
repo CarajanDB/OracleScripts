@@ -1,0 +1,382 @@
+g!/bin/bash
+# @(#) ================================================================================================================
+# @(#) File        : ORApreparestandby
+# @(#) Author      : Johannes Ahrends
+# @(#)
+# @(#) Version     : 0.8
+# @(#) Date        : 24.02.2023
+# @(#)
+# @(#) Description : Prepare Target environment for standby database
+# @(#)
+# @(#) Syntax      : see usage (ORApreparestandby -h)
+# @(#)
+# @(#) Attention   : This script must be started as user ORACLE on the Standby Server
+# @(#)
+# @(#) Presumption :
+# @(#) 1. oracle net is not configured (no listener.ora, no tnsnames.ora, no sqlnet.ora)
+# @(#) 2. primary and standby listener are using the same port
+# @(#) 3. Oracle software is installed, database exists in /etc/oratab
+# @(#) 4. Passwordless ssh connect to primary database possible
+# @(#) 5. ORACLE_HOME identical on primary and standby
+# @(#)
+# @@(#) Change History:
+# @@(#)
+# @@(#) 0.1     08.12.2015 J. Ahrends basic script as copy from ORAduplicate_db.sh
+# @@(#) 0.2     05.01.2016 J. Ahrends changes for variables, dbset
+# @@(#) 0.3     19.01.2016 J. Ahrends changes for variables
+# @@(#) 0.4     31.03.2016 WI         scp rmantab from primary added
+# @@(#) 0.5     04.04.2016 Th. Thiel  Formate fuer tnsnames.ora und listener.ora angepasst
+# @@(#)                               jeder Block endet nun mit >  )<
+# @@(#)                               ->dies hilft hinterher beim Loeschen der Eintraege
+# @@(#) 0.6     12.04.2016 Th. Thiel  Funktion createTNS angepasst =>ldap.ora wird auch angelegt
+# @@(#) 0.7     11.09.2016 M. Pils    Parameter "ps - PrimarySide" hinzugefuehgt.
+# @@(#)                               Nun kann auch eine S1 Seite als StandbySide vorbereitet werden.
+# @@(#) 0.8     24.02.2023 J. Ahrends compatible parameter in init_dup.ora geaendert, muss manuell gesetzt werden.
+# @(#) ================================================================================================================
+#
+# Variables
+#
+SCRIPTDIR=/app/oracle/bin
+DIR=$SCRIPTDIR
+LOCKFILE=$DIR/ORApreparestandby.lck
+DATE=`date +%Y-%m-%d-%H-%M-%S`
+DBNAME=$ORACLE_SID
+cd $DIR
+ADMINDIR=/app/oracle/admin/$DBNAME
+RT=0   
+STANDBYHOST=`uname -n`
+PRIMARYSIDE="S1"
+#-----------------------------------------------------------------------
+#
+#Functions
+#
+#-----------------------------------------------------------------------
+#
+#-----------------------------------------------------------------------
+# Usage help
+#-----------------------------------------------------------------------
+#
+usage() {
+   echo " "
+   echo "Function:  Prepare standby Host"
+   echo " "
+   echo "     Usage:  `basename $0` -p <PrimaryHostname> [-h]"
+   echo "        -p:  hostname for Primary host (fully qualified)"
+   echo "       -ps:  Primary Side (optional! default=S1)"
+   echo "       -po:  Listener Port (Must be identical on both Servers"
+   echo "        -h:  This help"
+   echo " "
+   echo " Example: $0 -p lx3g6.barmenia.lan -po 1661"
+}
+#
+#-----------------------------------------------------------------------
+# Logger Script
+#-----------------------------------------------------------------------
+#
+logger() {
+if [ -r $SCRIPTDIR/log4sh ]
+then
+   LOCALLOGGER="`basename $0 | cut -d"." -f 1`_log4sh.properties"
+   if [ -r $SCRIPTDIR/${LOCALLOGGER} ]
+   then
+      LOG4SH_CONFIGURATION=$SCRIPTDIR/$LOCALLOGGER . $SCRIPTDIR/log4sh
+   else
+      LOG4SH_CONFIGURATION=$SCRIPTDIR/log4sh.properties . $SCRIPTDIR/log4sh
+   fi
+else
+   echo "ERROR: could not load (log4sh)" >&2
+   exit 1
+fi
+#  echo "LOG4SH_CONFIGURATION:$LOG4SH_CONFIGURATION"
+}
+#
+#-----------------------------------------------------------------------
+# Create directories
+#-----------------------------------------------------------------------
+#
+createDir() {
+   logger_info Create directories and links
+   logger_debug "DBNAME = "$DBNAME
+   CURDIR=`pwd`
+   cd /app/oracle/admin
+   RT=0
+   mkdir -p ${DBNAME}/adump; RT=`expr $RT + $?`
+   mkdir -p ${DBNAME}/dpdump; RT=`expr $RT + $?`
+   mkdir -p ${DBNAME}/xdb_wallet; RT=`expr $RT + $?`
+   mkdir -p ${DBNAME}/pfile; RT=`expr $RT + $?`
+   mkdir -p ${DBNAME}/scripts; RT=`expr $RT + $?`
+   mkdir -p ${DBNAME}/dataguard; RT=`expr $RT + $?`
+   mkdir -p /app/oracle/data/${DBUNAME}/dataguard; RT=`expr $RT + $?`
+   if [ $RT -gt 0 ]
+   then
+      logger_error "Unable to create directories $RT"
+      exit $RT
+   fi
+
+   ln -s ${DBNAME} ${DBNAME}_${PRIMARYSIDE} > /dev/null 2>&1
+   ln -s ${DBNAME} ${DBNAME}_${STANDBYSIDE} > /dev/null 2>&1
+   cd ${CURDIR}
+}
+#
+#-----------------------------------------------------------------------
+# Create TNS files
+#    --> Create listener.ora
+#    --> Create tnsnames.ora
+#    --> Create sqlnet.ora
+#    --> Create ldap.ora
+#    --> Restart Listener
+#    --> Check Listener status
+#-----------------------------------------------------------------------
+#
+createTNS() {
+   logger_info "Create TNS files"
+   logger_debug TNS_ADMIN = $TNS_ADMIN
+#
+   logger_info Create listener.ora
+#
+   mv ${TNS_ADMIN}/listener.ora ${TNS_ADMIN}/listener.ora_${DATE} >/dev/null 2>&1
+   cat <<EOLSNR > ${TNS_ADMIN}/listener.ora
+# listener.ora Network Configuration File
+# Generated by Barmenia ORApreparestandby
+
+LISTENER_$DBNAME =
+  (DESCRIPTION_LIST =
+     (DESCRIPTION =
+        (ADDRESS = (PROTOCOL = TCP)(HOST = ${STANDBYHOST})(PORT = ${PORT}))
+     )
+  )
+SID_LIST_LISTENER_$DBNAME =
+  (SID_LIST =
+     (SID_DESC =
+        (GLOBAL_DBNAME = ${DBUNAME}_DGMGRL.unix.lan)
+        (SID_NAME = ${DBNAME})
+        (ORACLE_HOME =${ORACLE_HOME}))
+     (SID_DESC =
+        (GLOBAL_DBNAME = ${DBUNAME}.unix.lan)
+        (SID_NAME = ${DBNAME})
+        (ORACLE_HOME =${ORACLE_HOME}))
+  )
+EOLSNR
+#
+   logger_info Create tnsnames.ora
+#
+   mv ${TNS_ADMIN}/tnsnames.ora ${TNS_ADMIN}/tnsnames.ora_${DATE} >/dev/null 2>&1
+   cat <<EOTNS > ${TNS_ADMIN}/tnsnames.ora
+# tnsnames.ora Network Configuration File
+# Generated by Barmenia ORApreparestandby
+
+LISTENER_${DBNAME} =
+  (ADDRESS = (PROTOCOL = TCP)(HOST = ${STANDBYHOST})(PORT = ${PORT})
+  )  
+
+${DBNAME}_${PRIMARYSIDE} =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = ${PRIMARYHOST})(PORT = ${PORT}))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = ${DBNAME}_${PRIMARYSIDE}.unix.lan)
+      (UR = A)
+    )
+  )
+
+${DBNAME}_${STANDBYSIDE} =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = ${STANDBYHOST})(PORT = ${PORT}))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = ${DBNAME}_${STANDBYSIDE}.unix.lan)
+      (UR = A)
+    )
+  )
+EOTNS
+#
+   logger_info Create sqlnet.ora
+#
+   mv ${TNS_ADMIN}/sqlnet.ora ${TNS_ADMIN}/sqlnet.ora_${DATE} >/dev/null 2>&1
+   cat <<EOSQLNET > ${TNS_ADMIN}/sqlnet.ora
+# sqlnet.ora Network Configuration File
+# Generated by Barmenia ORApreparestandby
+
+NAMES.DIRECTORY_PATH= (tnsnames, ldap, EZCONNECT)
+EOSQLNET
+#
+   logger_info Create ldap.ora
+#
+   mv ${TNS_ADMIN}/ldap.ora ${TNS_ADMIN}/ldap.ora_${DATE} >/dev/null 2>&1
+   cat <<EOLDAP > ${TNS_ADMIN}/ldap.ora
+# ldap.ora Network Configuration File
+# Generated by Barmenia ORApreparestandby
+
+DIRECTORY_SERVERS= (oud.unix.lan:389:636)
+
+DEFAULT_ADMIN_CONTEXT = "dc=unix,dc=lan"
+
+DIRECTORY_SERVER_TYPE = OID
+EOLDAP
+#
+   logger_debug "Restart Listener"
+#
+   COMMAND1=`lsnrctl stop LISTENER_${DBNAME}`
+   COMMAND2=`lsnrctl start LISTENER_${DBNAME}`
+   COMMAND3=`lsnrctl status LISTENER_${DBNAME}` 
+ 
+   if [ `echo $COMMAND3 | grep -c "command completed successfully"` -eq 1 ]
+   then
+      RT=0
+      logger_info "Listener restart successful"
+   else
+      logger_error "Unable to start Listener LISTENER_${DBNAME}" 
+      logger_error $COMMAND
+      RT=1
+   fi
+#
+}
+
+s
+#-----------------------------------------------------------------------
+# Create Dummy init.ora
+g-----------------------------------------------------------------------
+#
+createPfile()
+{
+   logger_info Create file ${ADMINDIR}/pfile/init${DBNAME}_dup.ora
+   VERSION=`$ORACLE_HOME/OPatch/opatch lsinventory |awk '/^Oracle Database/ { print $NF}' | cut -d"." -f1-4`
+   cat <<EOORA > ${ADMINDIR}/pfile/init${DBNAME}_dup.ora
+*.audit_file_dest='$ADMINDIR/adump'
+*.audit_trail='DB'
+*.compatible='19.18.0.0'
+*.db_block_size=8192
+*.db_create_file_dest='/app/oracle/data'
+*.db_domain='unix.lan'
+g.db_name='DBNAME'
+*.db_recovery_file_dest='/app/oracle/fra'
+*.db_recovery_file_dest_size=8388608000
+*.db_unique_name='${DBUNAME}'
+*.diagnostic_dest='/app/oracle'
+*.log_archive_format='%t_%s_%r.arc'
+*.local_listener='LISTENER_${DBNAME}'
+*.open_cursors=1000
+*.pga_aggregate_target=512M
+*.processes=1000
+*.remote_login_passwordfile='EXCLUSIVE'
+*.sga_target=1500M
+*.undo_tablespace='UNDOTBS1'
+EOORA
+}
+
+#
+#-----------------------------------------------------------------------
+# Create Password File
+#-----------------------------------------------------------------------
+#
+createPWD()
+{
+   logger_info "Copy Password File from primary"
+   logger_debug "scp $PRIMARYHOST:$ORACLE_HOME/dbs/orapw${DBNAME} $ORACLE_HOME/dbs/orapw${DBNAME}"
+   scp $PRIMARYHOST:$ORACLE_HOME/dbs/orapw${DBNAME} $ORACLE_HOME/dbs/orapw${DBNAME}
+   if [ $? -ne 0 ]
+   then
+      logger_error Unable to create Password File
+      exit 21
+   fi
+}
+
+#
+#-----------------------------------------------------------------------
+# SCP rmantab from primary host
+#-----------------------------------------------------------------------
+#
+scpRMANTAB()
+{
+   logger_info "Copy RMANTAB File from primary"
+   logger_debug "scp $PRIMARYHOST:/app/oracle/admin/config/backup/rmantab /app/oracle/admin/config/backup/rmantab"
+   scp $PRIMARYHOST:/app/oracle/admin/config/backup/rmantab /app/oracle/admin/config/backup/rmantab
+   if [ $? -ne 0 ]
+   then
+      logger_error Unable to secure copy RMANTAB from Primary
+      exit 21
+   fi
+}
+
+#-----------------------------------------------------------------------
+#
+# Main
+#
+#-----------------------------------------------------------------------
+
+if [ $# -eq 0 ]
+then
+   usage
+   exit
+fi
+logger
+#
+# read Parameter 
+#
+while [ $# -gt 0 ]
+do
+   option="$1"
+   case $option in
+      -p)
+         PRIMARYHOST="$2"
+         shift
+         ;;
+      -ps)
+         PRIMARYSIDE="$2"
+         PRIMARYSIDE=`echo $PRIMARYSIDE|tr 'a-z' 'A-Z'`
+         shift
+         ;;
+      -po)
+         PORT="$2"
+         shift
+         ;;
+      -h)
+         usage
+         exit
+         ;;
+   esac
+   shift
+done
+
+if [ -z "$PRIMARYHOST" ]
+then
+   logger_fatal "Parameter PRIMARYHOST not set!"
+   exit 1
+fi
+if [ -z "$PORT" ]
+then
+   logger_fatal "Parameter PORT not set!"
+   exit 1
+fi
+logger_debug "Primary Host = "$PRIMARYHOST
+
+if [ "$PRIMARYSIDE" == "S1" ]; then
+  STANDBYSIDE="S2"
+else
+  STANDBYSIDE="S1"
+fi
+DBUNAME=${DBNAME}_${STANDBYSIDE}
+#
+ORAENV_ASK=NO
+ORACLE_SID=$DBNAME
+. oraenv
+unset ORAENV_ASK
+
+if [ -z $TNS_ADMIN ]
+then
+   logger_fatal "Variable TNS_ADMIN=$TNS_ADMIN or ORACLE_SID=$ORACLE_SID not set"
+fi
+#
+createDir
+#
+createTNS
+#
+createPfile
+#
+createPWD
+#
+scpRMANTAB
+#
+#
+# Cleanup
+#

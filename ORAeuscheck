@@ -1,0 +1,377 @@
+#!/bin/bash
+# @(#) =========================================================================
+# @(#) File        : ORAeuscheck
+# @(#) Author      : Marcel Pils
+# @(#) Version     : 1.5
+# @(#) Datum       : 05.04.2024
+# @(#)
+# @(#) Description : Check database and environment configuration for working eus functionality
+# @(#)               This script must be started as user ORACLE
+# @(#)
+# @@(#) History:
+# @@(#)
+# @@(#) 1.0  28.04.2015  Pils    Created
+# @@(#) 1.1  22.09.2015  Pils    Ergaenzt um *ldap* DB Parameter Pruefung
+# @@(#) 1.2  26.01.2018  Pils    changed pwddir location
+# @@(#) 1.3  01.02.2024  Pils    get oud ldap server infos from ldap.ora
+# @@(#) 1.4  07.02.2024  Pils    added parameter -db and -pdb and moved to Logger
+# @@(#)                          and added eus schema mapping lookup
+# @@(#) 1.5  05.04.2024  Pils    added "" araound oracle password
+# @(#) =========================================================================
+set -o pipefail
+
+[ -n "$SCRIPTDIR" ] || SCRIPTDIR=/app/oracle/bin
+source $SCRIPTDIR/ORAlib
+
+HOST=`hostname -s`
+LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Checks if EUS configuration works fine"
+LOGNAME=`logname`
+
+#-------------------------------------------------------------------------------
+#  Some functions
+#-------------------------------------------------------------------------------
+function usage()
+{
+  RC=${1:-0}
+  echo "
+  Command     : $SCRIPTNAME
+  Description : $SCRIPTSHORTDESC
+
+  Parameters  : -aduser [NNNNNN]  AD user for database authentication (default: $LOGNAME)
+                                  (use linux os user NNNNNNx for cdb/pdb test!)
+                -db     [DBUNAME] Non-CDB/CDB unique name (default: $DBUNAME)
+                -pdb    [PDBNAME] PDB name (optional)
+                -adv              Check eus database connection and eus environment
+                -h                help screen
+
+  Example     : $SCRIPTNAME -aduser 240531
+                $SCRIPTNAME -aduser 240531 -adv
+
+  Attention   : This script must be started as user ORACLE
+  "
+  exit $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#  Some functions
+#-----------------------------------------------------------------------------------------------------------------
+function check_wallet() {
+  WALLETLOCATION=$1
+  logger_info "List content of wallet $WALLETLOCATION ..."
+  DBDN=$($ORACLE_HOME/bin/mkstore -wrl $WALLETLOCATION -nologo -viewEntry ORACLE.SECURITY.DN <<EOF
+$WALLETPWD
+EOF
+)
+  DBDN=$(echo $DBDN|awk 'BEGIN { FS = " = " } { print $2 }')
+  echo "ORACLE.SECURITY.DN = $DBDN"
+
+  DBPASSWORD=$($ORACLE_HOME/bin/mkstore -wrl $WALLETLOCATION -nologo -viewEntry ORACLE.SECURITY.PASSWORD <<EOF
+$WALLETPWD
+EOF
+)
+  DBPASSWORD=$(echo $DBPASSWORD|awk 'BEGIN { FS = " = " } { print $2 }')
+  #echo "ORACLE.SECURITY.PASSWORD = $DBPASSWORD"
+
+  logger_info "Check db password for connection to $LDAP_SERVER ..."
+  $ORACLE_HOME/bin/ldapbind -h $LDAP_SERVER -p $LDAP_PORT -D $DBDN -q <<EOF
+$DBPASSWORD
+EOF
+  if [ $? -ne 0 ]; then
+    logger_error "Check failed!"
+  else
+    logger_info "Check succeeded!"
+  fi
+}
+
+function get_mapping_schema() {
+  # function check_wallet has to be run before
+  # required for DBDN and DBPASSWORD variable setup
+  echo
+  logger_info "Get eus mapping schema for ad user $ADUSER from $LDAP_SERVER ..."
+  $ORACLE_HOME/bin/ldapsearch -h $LDAP_SERVER -p $LDAP_PORT -D $DBDN -q \
+  "(&(objectClass=orclDBEntryLevelMapping)(orclDBDistinguishedName=cn=${ADUSER},*))" <<EOF
+$DBPASSWORD
+EOF
+  if [ $? -ne 0 ]; then
+    logger_error "Check failed!"
+  else
+    logger_info "Check succeeded!"
+  fi
+}
+
+#-------------------------------------------------------------------------------
+#  Get Parameter
+#-------------------------------------------------------------------------------
+adv=0
+ADUSER=$LOGNAME
+while true; do
+  case "$1" in
+    -aduser )     ADUSER="$2";aduser=1; shift 2 ;;
+    -db )         DBUNAME="$2";dbuname=1; shift 2 ;;
+    -pdb )        PDBNAME="$2";pdb=1; shift 2 ;;
+    -adv )        adv=1; shift 1 ;;
+    -h | --help ) usage ;;
+    -- | '' )     shift; break ;;
+    * )           echo "Parameter $1 not supported!"; usage 1 ;;
+  esac
+done
+
+#-------------------------------------------------------------------------------
+#  Initialization and checks
+#-------------------------------------------------------------------------------
+Logger
+
+if [ "$pdb" == "1" -a -z "$PDBNAME" ]; then
+  logger_error "PDBNAME missng for option -pdb!"
+  exit 101
+fi
+# Check if user is oracle
+if [ `id -un` != "oracle" ]; then
+  logger_error "Script may not run as user `id -un`, it must be started and run as oracle"
+  exit 102
+fi
+# Check required env vars (TNS_ADMIN used in GetLdapServer function)
+if [ -z "$ORACLE_HOME" -o -z "$ORACLE_BASE" -o -z "$ORACLE_SID" -o -z "$TNS_ADMIN" -o -z "$DBUNAME" ]; then
+  logger_error "Required environment variables missing (ORACLE_HOME, ORACLE_BASE, ORACLE_SID, TNS_ADMIN, DBUNAME)!"
+  exit 103
+fi
+
+#-------------------------------------------------------------------------------
+#  Set environment
+#-------------------------------------------------------------------------------
+# PWDDIR=/app/oracle/admin/etc/pwddir
+#OUDPWD=`cat ${PWDDIR}/.pwdfile_oud_directorymanager|awk -F"'" '{print $2}'`
+
+DBUNAME="${DBUNAME^^}"    # ensure upper case
+PDBNAME="${PDBNAME^^}"    # ensure upper case
+WALLETPWD=`cat ${PWDDIR}/.pwdfile_eus_dbwallet|awk -F"'" '{print $2}'`
+
+# get env variables LDAP_SERVER, LDAP_PORT, LDAPS_PORT from ldap.ora
+GetLdapServer
+read -s -p "AD password for user '$ADUSER': " ADPWD
+echo
+
+#-------------------------------------------------------------------------------
+#  Main program
+#-------------------------------------------------------------------------------
+
+logger_info "Connection tests using DIRECTORY_SERVER ($LDAP_SERVER:$LDAP_PORT:$LDAPS_PORT)"
+
+# Tnsping test
+echo
+logger_info "Tnsping check for eus registered non-cdb/cdb '${DBUNAME}' ..."
+$ORACLE_HOME/bin/tnsping "${DBUNAME}"
+if [ $? -ne 0 ]; then
+  logger_error "Check failed!"
+else
+  logger_info "Check succeeded!"
+fi
+
+if [ -n "$PDBNAME" ]; then
+  echo
+  logger_info "Tnsping check for eus registered pdb '${PDBNAME}_${DBUNAME}' ..."
+  $ORACLE_HOME/bin/tnsping "${PDBNAME}_${DBUNAME}"
+  if [ $? -ne 0 ]; then
+    logger_error "Check failed!"
+  else
+    logger_info "Check succeeded!"
+  fi
+  echo
+fi
+
+# EUS local connection tests
+echo
+logger_info "Eus local connection test for non-cdb/cdb ..."
+logger_info "Connect \"$ADUSER\"/\"<password>\" ..."
+$ORACLE_HOME/bin/sqlplus -s -L /nolog <<EOF
+whenever sqlerror exit 100
+whenever oserror exit 200
+conn "$ADUSER"/"$ADPWD"
+EOF
+if [ $? -ne 0 ]; then
+  logger_error "Check failed!"
+else
+  logger_info "Check succeeded!"
+fi
+
+# EUS remote connection tests
+echo
+logger_info "Eus remote connection test for non-cdb/cdb ..."
+logger_info "Connect \"$ADUSER\"/\"<password>\"@$DBUNAME ..."
+$ORACLE_HOME/bin/sqlplus -s -L /nolog <<EOF
+whenever sqlerror exit 100
+whenever oserror exit 200
+conn "$ADUSER"/"$ADPWD"@$DBUNAME
+EOF
+if [ $? -ne 0 ]; then
+  logger_error "Check failed!"
+else
+  logger_info "Check succeeded!"
+fi
+
+if [ -n "$PDBNAME" ]; then
+  echo
+  logger_info "Eus remote connection test for pdb ..."
+  logger_info "Connect \"$ADUSER\"/\"<password>\"@${PDBNAME}_${DBUNAME} ..."
+  $ORACLE_HOME/bin/sqlplus -s -L /nolog <<EOF
+  whenever sqlerror exit 100
+  whenever oserror exit 200
+  conn "$ADUSER"/"$ADPWD"@${PDBNAME}_${DBUNAME}
+EOF
+  if [ $? -ne 0 ]; then
+    logger_error "Check failed!"
+  else
+    logger_info "Check succeeded!"
+  fi
+fi
+
+# Exit script if no advanced checks needed
+if [ "$adv" = "0" ]; then
+  exit
+fi
+
+echo; logger_info "List eus registered db entry for $DBUNAME ..."
+ORAtnsService -opt list -tnssrv "${DBUNAME}" -type eus -dump
+
+if [ -n "$PDBNAME" ]; then
+  echo; logger_info "List eus registered db entry for ${PDBNAME}_${DBUNAME} ..."
+  ORAtnsService -opt list -tnssrv "${PDBNAME}_${DBUNAME}" -type eus -dump
+fi
+
+# List ldap.ora and sqlnet.ora
+echo
+logger_info "List content of $TNS_ADMIN/sqlnet.ora ..."
+grep -v "^#" $TNS_ADMIN/sqlnet.ora | grep -v "^$"
+
+echo
+logger_info "List content of $TNS_ADMIN/ldap.ora ..."
+grep -v "^#" $TNS_ADMIN/ldap.ora | grep -v "^$"
+
+# Check wallet for non-cdb/cdb
+echo
+logger_info "List wallet locations for non-cdb/cdb ..."
+ls -ltd "$ORACLE_BASE/admin/$DBUNAME/wallet"
+ls -ltd "$ORACLE_HOME/admin/$DBUNAME/wallet"
+check_wallet "$ORACLE_BASE/admin/$DBUNAME/wallet"
+
+# Check wallet for non-cdb/cdb
+if [ -n "$PDBNAME" ]; then
+  # Get pdb guid
+  PDB_GUID=$($ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+  set pagesize 0
+  select guid from v\$containers where upper(name) = '${PDBNAME}';
+EOF
+)
+  echo
+  logger_info "List wallet locations for pdb ..."
+  ls -ltd "$ORACLE_BASE/admin/$DBUNAME/$PDB_GUID/wallet"
+  ls -ltd "$ORACLE_HOME/admin/$DBUNAME/$PDB_GUID/wallet"
+  check_wallet "$ORACLE_BASE/admin/$DBUNAME/$PDB_GUID/wallet"
+fi
+
+# List eus mapping schema for used ad user
+get_mapping_schema
+
+# List smon environment
+echo
+logger_info "List smon environment ..."
+PID=`ps -ef|grep smon_$ORACLE_SID|grep -v grep|awk '{print $2}'`
+ps eauww $PID | grep ora_smon_|grep -v grep
+echo
+for i in $(ps eauww $PID | grep ora_smon_|grep -v grep); \
+  do echo $i; done|grep -e ORACLE_HOME -e ORACLE_BASE -e DBUNAME -e DBNAME |sort
+
+# Get container name (CDB$ROOT for CDB)
+CON_NAME=$($ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+set pagesize 0
+show con_name
+EOF
+)
+
+# Check eus db parameter for non-cdb/cdb
+echo
+logger_info "List eus db parameter in non-cdb/cdb ..."
+logger_info "LDAP_DIRECTORY_ACCESS have to be set to PASSWORD!"
+logger_info "LDAP_DIRECTORY_SYSAUTH should be set to YES!"
+$ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+col con_name for a10
+show con_name
+show parameter ldap
+EOF
+
+# Check eus db parameter for pdb
+if [ -n "$PDBNAME" ]; then
+  echo
+  logger_info "List eus db parameter in pdb ..."
+  logger_info "LDAP_DIRECTORY_ACCESS have to be set to PASSWORD!"
+  logger_info "LDAP_DIRECTORY_SYSAUTH should be set to YES!"
+  $ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+  alter session set container=${PDBNAME};
+  col con_name for a10
+  show con_name
+  show parameter ldap
+EOF
+fi
+
+# Prepare global user and roles sql
+if [ "$CON_NAME" == 'CDB$ROOT' ]; then
+  # CDB environment
+  USER_SQL="
+  select con_id_to_con_name(con_id) as con_name,USERNAME,PASSWORD,ACCOUNT_STATUS as status,
+         DEFAULT_TABLESPACE as def_tbs,TEMPORARY_TABLESPACE as temp_tbs
+    from cdb_users
+    where password='GLOBAL';
+  "
+  ROLES_SQL="
+  select con_id_to_con_name(con_id) as con_name, ROLE, AUTHENTICATION_TYPE as auth_type, COMMON, ORACLE_MAINTAINED as ora_maint, INHERITED, IMPLICIT
+    from cdb_roles
+   where AUTHENTICATION_TYPE='GLOBAL';
+  "
+else
+  # Non-CDB environment
+  USER_SQL="
+  select USERNAME,PASSWORD,ACCOUNT_STATUS as status,
+         DEFAULT_TABLESPACE as def_tbs,TEMPORARY_TABLESPACE as temp_tbs
+   from dba_users
+  where password='GLOBAL';
+  "
+  ROLES_SQL="
+  select ROLE, AUTHENTICATION_TYPE as auth_type, COMMON, ORACLE_MAINTAINED as ora_maint, INHERITED, IMPLICIT
+    from dba_roles
+   where AUTHENTICATION_TYPE='GLOBAL';
+  "
+fi
+
+# List eus global user/schema
+echo
+logger_info "List eus global user/schema in database ..."
+$ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+set lin 120 pagesize 50
+col con_name for a10
+col username for a15
+col password for a10
+col status for a10
+col def_tbs for a15
+col temp_tbs for a15
+${USER_SQL}
+EOF
+
+# List eus global roles
+echo
+logger_info "List eus global roles in database ..."
+$ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+set lin 120 pagesize 50
+col con_name for a10
+col role for a30
+col AUTH_TYPE for a9
+col common for a6
+col ora_maint for a9
+col INHERITED for a10
+col IMPLICIT for a9
+${ROLES_SQL}
+EOF
+
+logger_info "End of OUD eus checks."
+exit

@@ -1,0 +1,205 @@
+# @(#) ================================================================================================================
+# @(#)  File        : ORAstart_oradeploy
+# @(#)  Author      : Thorsten Thiel
+# @(#)  Modified    :
+# @(#)
+# @(#)  Description : This script is invoked by FLOWSTER and starts ORAdeploy remotely
+# @(#)
+# @(#)  Version     : 0.6
+# @(#)  Date        : 09.11.2018
+# @(#)
+# @(#)  Presumption : This script
+# @(#)                1. must be started as user bmysql
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)    0.1  2016-05-04  Thiel       Created
+# @@(#)    0.2  2017-03-06  mpils       Umgestellt auf pseudoterminal (ssh -t) und interaktive login shell (bash --login -i)
+# @@(#)    0.3  2017-05-16  Thiel       Funktion zum Loeschen alter Logfiles (aelter als 30 Tage) eingefuegt
+# @@(#)    0.4  09.11.2018  Thiel       added function check_n_remove_old_known_hosts_entries
+# @@(#)    0.5  09.11.2018  Thiel       some minor changes
+# @@(#)    0.6  09.11.2018  Thiel       if ip-address and hostname of known_host entry are similar to DEPLOY_HOST nothing has to be done
+# @(#) ================================================================================================================
+
+
+#
+# 06.03.2017, mpils - Umgestellt auf pseudoterminal (ssh -t) und interaktive login shell (bash --login -i)
+# 
+
+SCRIPTNAME=$(basename $0)
+BINDIR="/app/oracle/bin"
+#
+#-----------------------------------------------------------------------
+# Logger Script
+#-----------------------------------------------------------------------
+#
+logger() {
+if [ -r $BINDIR/log4sh ]
+then
+   LOCALLOGGER="`basename $0 | cut -d"." -f 1`_log4sh.properties"
+   if [ -r $BINDIR/${LOCALLOGGER} ]
+   then
+      LOG4SH_CONFIGURATION=$BINDIR/$LOCALLOGGER . $BINDIR/log4sh
+   else
+      LOG4SH_CONFIGURATION=$BINDIR/log4sh.properties . $BINDIR/log4sh
+   fi
+else
+   echo "ERROR: could not load (log4sh)" >&2
+   exit 1
+fi
+#  echo "LOG4SH_CONFIGURATION:$LOG4SH_CONFIGURATION"
+}
+
+#
+#-----------------------------------------------------------------------
+# check host existance
+#-----------------------------------------------------------------------
+#
+check_host_existance() {
+logger_info "checke Existenz des Zielhosts"
+ping -c3 $DEPLOY_HOST >/dev/null 2>&1
+if [ $? -ne 0 ]
+then
+   MESSAGE="Zielmaschine >$DEPLOY_HOST< ist nicht pingbar!"
+   logger_error "$MESSAGE"
+   echo "$MESSAGE"
+   exit 1
+fi
+}
+
+#
+#-----------------------------------------------------------------------
+# delete old logfiles
+#-----------------------------------------------------------------------
+#
+del_old_logs() {
+#Diese Funktion loescht alte Logfiles aelter als 30 Tage
+LOGDIR=/app/oracle/admin/log
+FILEPATTERN='ORAstart_oradeploy'
+find ${LOGDIR} -user oracle -name "${FILEPATTERN}*" -mtime +30 -exec rm {} \;
+}
+
+#
+#-----------------------------------------------------------------------
+# check ssh connectivity
+#-----------------------------------------------------------------------
+#
+check_ssh_connectivity() {
+#Diese Funktion prueft die SSH-Connectivity zu dem uebergebenen HOST
+#durch die Verwendung von -o "StrictHostKeyChecking=no" -o "BatchMode=yes" wird zusaetzlich automatisch ein Eintrag in der known_hosts erzeugt,
+#ohne das man die sonst obligatorische Frage nach dem Weitermachen mit yes beantworten muss
+logger_info "checke SSH-Vertrauensstellung zu Zielhost"
+REM_HOST=$1
+SSH_STATUS=`(ssh -q -o "StrictHostKeyChecking=no" -o "BatchMode=yes" -o "ConnectTimeout=3" $REM_HOST "echo 2>&1" && echo SSH_OK || echo SSH_NOK)|tail -1`
+if [ "$SSH_STATUS" != "SSH_OK" ]
+then
+   MESSAGE="Es besteht keine SSH-Vertrauensstellung zu >$REM_HOST<!"
+   logger_error "$MESSAGE"
+   echo "$MESSAGE"
+   exit 1
+fi
+}
+
+#
+#-----------------------------------------------------------------------
+# check and remove old known_hosts entries
+#-----------------------------------------------------------------------
+#all ssh targets are noticed in ~/.ssh/known_hosts with hostname, ip-address and public key
+#after some time it may happen that a host is decomissioned and it's ip-address is reused by another host
+#this leads to double entries for that ip-address in known_hosts and this generates an ssh error like:
+#
+#Warning: the RSA host key for 'lxorak5o.barmenia.lan' differs from the key for the IP address '172.21.3.90'
+#Offending key for IP in /app/oracle/.ssh/known_hosts:149
+#Matching host key in /app/oracle/.ssh/known_hosts:444
+#Are you sure you want to continue connecting (yes/no)?
+#
+#this function searches for ip-address entries in known_host used by another host than the current host
+#and deletes this entry
+check_n_remove_old_known_hosts_entries() {
+logger_info "pruefe known_hosts"
+
+#ip-adresse bestimmen
+REM_HOST_IP=`nslookup $DEPLOY_HOST|grep -A 2 'answer:'|tail -1|awk '{print $2}'`
+if [ -z "$REM_HOST_IP" ]
+then
+   MESSAGE="Die IP-Adresse von >$DEPLOY_HOST< kann nicht bestimmt werden!"
+   logger_error "$MESSAGE"
+   echo "$MESSAGE"
+   exit 1
+fi
+
+#ip-adresse in known_hosts suchen
+grep $REM_HOST_IP ~/.ssh/known_hosts|grep -v $DEPLOY_HOST >/dev/null 2>&1
+if [ $? -eq 0 ]
+then
+   MESSAGE="Der folgende known_hosts-Eintrag wird entfernt:"
+   logger_info "$MESSAGE"
+   echo "$MESSAGE"
+   LINENR=`grep -n $REM_HOST_IP ~/.ssh/known_hosts|awk -F: '{print $1}'`
+   ENTRY=`sed -n "${LINENR},${LINENR}p" ~/.ssh/known_hosts`
+   logger_info "$ENTRY"
+#ip-adresse loeschen
+   sed -i "${LINENR},${LINENR}d" ~/.ssh/known_hosts
+   if [ $? -ne 0 ]
+   then
+      MESSAGE="der obsolete known_hosts-Eintrag konnte nicht entfernt werden!"
+      logger_error "$MESSAGE"
+      echo "$MESSAGE"
+      exit 1
+   fi
+fi
+}
+
+del_old_logs
+
+logger
+
+#logger_info "$SCRIPTVERSION"
+#logger_info "$SCRIPTDATE"
+DATE=`date +%Y%m%d%H%M%S`
+logger_info "$DATE $SCRIPTNAME gestartet"
+logger_info "$*"
+PARAM_LIST=$1
+DEPLOY_HOST=`echo $PARAM_LIST|sed s/_/' '/|awk '{print $1}'`
+DEPLOY_PARMS=`echo $PARAM_LIST|sed s/_/' '/|awk '{print $2}'`
+DEPLOY_PARMS=`echo $DEPLOY_PARMS|sed s/'#'/' '/g`
+DEPLOY_PGM="/app/oracle/bin/ORAdeploy"
+
+check_host_existance
+check_n_remove_old_known_hosts_entries
+check_ssh_connectivity $DEPLOY_HOST
+
+#CMD="ssh -tt $DEPLOY_HOST '$DEPLOY_PGM $DEPLOY_PARMS >/tmp/remote_oradeploy_$DATE 2>&1'"
+#CMD="ssh $DEPLOY_HOST '$DEPLOY_PGM $DEPLOY_PARMS >/tmp/remote_oradeploy_$DATE'"
+CMD="ssh -t $DEPLOY_HOST \"bash --login -i -c '$DEPLOY_PGM $DEPLOY_PARMS' >/tmp/remote_oradeploy_$DATE\""     #mpils: 06.03.2017 - Umgestellt auf pseudoterminal (ssh -t) und interaktive login shell (bash --login -i)
+logger_info "CMD: $CMD"
+#####
+#EXIT zu Testzwecken
+#exit
+#####
+
+#Dieser Teil muss vor Produktivsetzung entfernt werden!!!
+#scp lxora:/app/oracle/software/scripts/devel/thi/ORAdeploy.new ./ORAdeploy >/dev/null 2>&1
+#scp ./ORAdeploy $DEPLOY_HOST:/app/oracle/bin/ORAdeploy >/dev/null 2>&1
+#rm ORAdeploy >/dev/null 2>&1 >/dev/null 2>&1
+#Dieser Teil muss vor Produktivsetzung entfernt werden!!!
+
+/bin/bash -c "$CMD"
+REMOTE_RC=$?
+if [ $REMOTE_RC -gt 0 ]
+then
+   scp $DEPLOY_HOST:/tmp/remote_oradeploy_$DATE /tmp/${DEPLOY_HOST}_remote_oradeploy_$DATE >/dev/null
+   ssh $DEPLOY_HOST 'rm /tmp/remote_oradeploy_$DATE 2>/dev/null'
+   REMOTE_ERG=$(strings /tmp/${DEPLOY_HOST}_remote_oradeploy_$DATE|tail -1|sed s/\\[31m//)
+   rm /tmp/${DEPLOY_HOST}_remote_oradeploy_$DATE
+else
+   REMOTE_ERG="Ausfuehrung erfolgreich!"
+   ssh $DEPLOY_HOST 'rm /tmp/remote_oradeploy_$DATE 2>/dev/null'
+fi
+
+logger_info "$REMOTE_ERG"
+logger_info "REMOTE_RC: $REMOTE_RC"
+
+#Ausgabestring zur Weiterverarbeitung im Workflow
+echo "$REMOTE_ERG"
+exit $REMOTE_RC

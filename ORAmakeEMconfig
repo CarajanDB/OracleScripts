@@ -1,0 +1,590 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAmakeEMconfig
+# @(#) Author      : Julia Bock
+# @(#) Modified    :
+# @(#)
+# @(#) Description : This script does all the things described after
+# @(#)               http://lxwiki.unix.lan/wiki_root/dokuwiki/dokumentationen/doku.php=datenbanken:oracle:oramakeemconfig#manual_zu_oramakeemconfig
+# @(#)
+# @(#) Version     : 1.4
+# @(#) Datum       : 24.07.2024
+# @(#)
+# @(#) Presumption : This script
+# @(#)                1. must be started as user ORACLE
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)  0.1   16.07.2021  JBI    Created
+# @@(#)  0.2   30.07.2021  THI    added option -a|--action
+# @@(#)  0.2.1 30.07.2021  THI    changed function usage
+# @@(#)  0.3   30.07.2021  THI    added function show_tasks
+# @@(#)  0.3.1 30.07.2021  THI    have to use the correct variables
+# @@(#)  0.4   30.07.2021  THI    added function cr_upd_emdo
+# @@(#)  0.4.1 30.07.2021  THI    changed function cr_add_emdo
+# @@(#)  0.4.2 30.07.2021  THI    minor change in function cr_add_emdo
+# @@(#)  0.5   30.07.2021  THI    added function cr_del_emdo
+# @@(#)  0.5.1 30.07.2021  THI    minor change in function cr_del_emdo
+# @@(#)  0.5.2 02.08.2021  THI    /etc/oragchomelist has to be deleted, too
+# @@(#)  0.5.3 02.08.2021  THI    use sudo to delete /etc/oragchomelist
+# @@(#)  0.5.4 02.08.2021  THI    minor change in function usage
+# @@(#)  0.5.5 02.08.2021  THI    minor change in defining option variables
+# @@(#)  0.5.6 02.08.2021  THI    minor change in function usage
+# @@(#)  0.5.7 18.10.2021  THI    get name and path of root.sh according to installation
+# @@(#)  0.5.8 18.10.2021  THI    minor syntax change
+# @@(#)  0.5.9 18.10.2021  THI    use masking sign
+# @@(#)  0.6   18.10.2021  THI    added function det_agt_port
+# @@(#)  0.6.1 18.10.2021  THI    have to use correct apostrophe
+# @@(#)  0.7   13.04.2022  THI    after option -a you have to give a parameter
+# @@(#)  0.8   27.11.2023  THI    subscribe and update to gold agent image
+# @@(#)  0.9   28.11.2023  THI    additional improvements in generating EMDO file
+# @@(#)  1.0   05.12.2023  THI    exit with error if UPDATESTATE cannot be determined
+# @@(#)  1.1   11.12.2023  THI    exit with error if UPDATESTATE is NotUpdatable, too
+# @@(#)  1.2   21.05.2024  MPils  fixed indentation
+# @@(#)  1.3   23.07.2024  MPils  modified 'dbset agent' usage working also for oracle_rh8 environment
+# @@(#)  1.4   24.07.2024  MPils  added TNS_ADMIN for target_type oracle_listener see mos note 2232442.1
+# @(#) ================================================================================================================
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+source /app/oracle/bin/ORAlib
+ACTIVE_HOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="does all the things described at:
+                http://lxwiki.unix.lan/wiki_root/dokuwiki/dokumentationen/doku.php=datenbanken:oracle:oramakeemconfig#manual_zu_oramakeemconfig
+"
+EMDO_DIR=/oranfs/share/ora_admin/EM
+PWDDIR="/app/oracle/admin/etc/pwddir"
+
+source $SCRIPTDIR/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+  echo ".bash_functions file not found!"
+  exit $RC
+fi
+
+# notwendig fuer Aufruf per SSH vom Transferhost aus
+# bei Aufruf ueber SSH ist der PATH nicht vollstaendig gesetzt
+if [ -z $PATH ]
+then
+  if [ -s ~/.bashrc ]
+  then
+    source ~/.bashrc
+  fi
+fi
+
+echo $PATH|grep ":/sbin:" >/dev/null
+if [ $? -eq 1 ]
+then
+  PATH="$PATH:/sbin"
+fi
+# Notwendig fuer Aufruf per SSH vom Transferhost aus
+
+WHAT="$SCRIPTDIR/what"
+SCRIPTVERSION="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep 'Version     :'|awk '{print $3,$4,$5}'`"
+SCRIPTDATE="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep 'Date        :'|awk '{print $3,$4,$5}'`"
+
+Logger
+logger_info "$SCRIPTNAME gestartet"
+LOGDATE=`date +"%Y%m%d"`
+LOGFILE="/app/oracle/admin/log/${SCRIPTNAME}-${LOGDATE}.log"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+ACTIVE_USER=`id -un`
+if [ "$ACTIVE_USER" != "oracle" ]; then
+  MESSAGE="Script may not run as user $ACTIVE_USER, it must be started and run as oracle"
+  logger_fatal "$MESSAGE"
+  RC=255
+  MESSAGE="Error Code: ${RC}"
+  logger_fatal "$MESSAGE"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     START of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Check if user is on host lxhko or lx0wj, if yes params cannot be filled with default values!
+#-----------------------------------------------------------------------------------------------------------------
+function check_host() {
+  if [ "$ACTIVE_HOST" == "lx0wj.unix.lan" -o "$ACTIVE_HOST" == "lxhko.barmenia.lan" ] #No default values on host lxhko or lx0wj
+  then
+    NO_DEFAULTS=1
+  else
+    NO_DEFAULTS=0
+  fi
+  return
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Validate params
+#-----------------------------------------------------------------------------------------------------------------
+function validate_params()
+{
+  check_host
+
+  if [ "x$action" == 'x' ] #ACTION wasn't given
+  then
+    MESSAGE="Option -a is mandatory!"
+    logger_fatal "$MESSAGE"
+    exit 1
+  else
+    if [ "$ACTION" != 'add' -a "$ACTION" != 'upd' -a "$ACTION" != 'del' ]
+    then
+      MESSAGE="parameter ACTION should be add, upd or del; found >${ACTION}<!"
+      logger_error "$MESSAGE"
+      exit 1
+    fi
+  fi
+
+  if [ "x$machine" == 'x' ] #Machine name wasn't given
+  then
+    if [ $NO_DEFAULTS -eq 1 ] #Host is lxhko or lx0wj
+    then
+      MESSAGE="No default value available for FQDN_MACHINE on host $ACTIVE_HOST!"
+      logger_fatal "$MESSAGE"
+      exit 1
+    else
+      FQDN_MACHINE=$ACTIVE_HOST
+    fi
+  fi
+
+  if [ "x$sid" == 'x' ] #sid wasn't given
+  then
+    if [ $NO_DEFAULTS -eq 1 ] #Host is lxhko or lx0wj
+    then
+      MESSAGE="No default value available for ORACLE_SID on host $ACTIVE_HOST!"
+      logger_fatal "$MESSAGE"
+      exit 1
+    else
+      if [ -z $ORACLE_SID ]
+      then
+        MESSAGE="ORACLE_SID is not set!"
+        logger_fatal "$MESSAGE"
+        exit 1
+      fi
+    fi
+  fi
+
+  LSNR_NAME="LISTENER_$ORACLE_SID"
+  FILENAME="$EMDO_DIR/${ACTION}_${ORACLE_SID}.emdo"
+
+  if [ "x$port" == 'x' ] #port wasn't given
+  then
+    if [ $NO_DEFAULTS -eq 1 ] #Host is lxhko or lx0wj
+    then
+      MESSAGE="No default value available for LSNR_PORT on host $ACTIVE_HOST!"
+      logger_fatal "$MESSAGE"
+      exit 1
+    else
+      LSNR_PORT=1601
+    fi
+  fi
+
+  if [ "x$orahome" == 'x' ] #orahome wasn't given
+  then
+    if [ $NO_DEFAULTS -eq 1 ] #Host is lxhko or lx0wj
+    then
+      MESSAGE="No default value available for ORACLE_HOME on host $ACTIVE_HOST!"
+      logger_fatal "$MESSAGE"
+      exit 1
+    else
+      if [ -z $ORACLE_HOME ]
+      then
+        MESSAGE="ORACLE_HOME is not set!"
+        logger_fatal "$MESSAGE"
+        exit 1
+      fi
+    fi
+  fi
+
+  if [ "x$tnsadmin" == 'x' ] #tnsadmin wasn't given
+  then
+    if [ $NO_DEFAULTS -eq 1 ] #Host is lxhko or lx0wj
+    then
+      MESSAGE="No default value available for TNS_ADMIN on host $ACTIVE_HOST!"
+      logger_fatal "$MESSAGE"
+      exit 1
+    else
+      if [ -z $TNS_ADMIN ]
+      then
+        MESSAGE="TNS_ADMIN is not set!"
+        logger_fatal "$MESSAGE"
+        exit 1
+      fi
+    fi
+  fi
+
+  if [ "x$wait" == 'x1' ]
+  then
+    show_tasks
+  fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: show tasks and wait WAIT secs
+#-----------------------------------------------------------------------------------------------------------------
+function show_tasks()
+{
+  echo
+  echo "create EMDO file: $FILENAME"
+  echo
+  echo "FQDN            : $FQDN_MACHINE"
+  echo "ORACLE_SID      : $ORACLE_SID"
+  echo "PORT            : $LSNR_PORT"
+  echo "ORACLE_HOME     : $ORACLE_HOME"
+  echo "TNS_ADMIN       : $TNS_ADMIN"
+  echo
+  echo "in $WAIT Sekunden geht's weiter!"
+  echo "oder CTRL-C druecken!"
+  sleep $WAIT
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: create add_$ORACLE_SID.emdo-file to be executed by enterprise manager and fill placeholders, such as FQDN_MACHINE, ORACLE_SID, LSNR_PORT and ORACLE_HOME
+#-----------------------------------------------------------------------------------------------------------------
+function create_emdo_file()
+{
+
+  if [ -s "${FILENAME}ne" ]   # lookup /oranfs/share/ora_admin/EM/add_C40JK.emdolog
+  then
+    MESSAGE="${FILENAME}ne already exists. Data already entered in Enterprise Manager!"
+    logger_fatal "$MESSAGE"
+    exit 1
+  fi
+
+  case $ACTION in
+    add ) cr_add_emdo;;
+    upd ) cr_upd_emdo;;
+    del ) cr_del_emdo;;
+  esac
+
+  if [ ! -s $FILENAME ]
+  then
+    MESSAGE="File $FILENAME could not be created!"
+    logger_fatal "$MESSAGE"
+    exit 1
+  else
+    MESSAGE="File $FILENAME was succesfully created!"
+    logger_info "$MESSAGE"
+  fi
+
+  return
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: determine agent port
+#-----------------------------------------------------------------------------------------------------------------
+function det_agt_port() {
+  if [ "x$machine" == 'x' ] #Machine name wasn't given
+  then
+    . dbset agent 2>/dev/null
+    AGT_PORT=`emctl status agent|grep '^Agent URL'|awk -F: '{print $4}'|awk -F/ '{print $1}'`
+    MESSAGE="found port $AGT_PORT for running agent!"
+    logger_info "$MESSAGE"
+  else
+    MESSAGE='will assume port 3872 for running agent!'
+    logger_info "$MESSAGE"
+    AGT_PORT=3872
+  fi
+
+  return
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: create DEL emdo file
+#-----------------------------------------------------------------------------------------------------------------
+function cr_del_emdo() {
+  det_agt_port
+  cat <<EODEL >$FILENAME
+  emcli login -username=sysman
+  emcli sync
+
+  # Stop agent on FQDN_MACHINE
+  # ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bashrc; . /app/oracle/bin/dbset agent; emctl stop agent'
+  ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bash_profile >/dev/null 2>&1; . dbset agent; emctl stop agent'
+
+  # Show status of agent on FQDN_MACHINE
+  # ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bashrc; . /app/oracle/bin/dbset agent; emctl status agent'
+  ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bash_profile >/dev/null 2>&1; . dbset agent; emctl status agent'
+
+  # Show status of agent on FQDN_MACHINE in EM
+  emcli get_targets -targets="${FQDN_MACHINE}%:oracle_emd"
+  echo "will sleep for 30 seconds to let EM notify agent DOWN status"
+  sleep 30
+
+  # Show status of agent on FQDN_MACHINE in EM again
+  emcli get_targets -targets="${FQDN_MACHINE}%:oracle_emd"
+  emcli delete_target \\
+    -name="${FQDN_MACHINE}:${AGT_PORT}" \\
+    -type="oracle_emd" \\
+    -delete_monitored_targets \\
+    -async
+
+  # Remove agent installation directory
+  ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bashrc; rm -rf /app/oracle/product/em'
+  ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bashrc; sudo rm -rf /etc/oragchomelist'
+  emcli sync
+  emcli logout
+EODEL
+
+  return
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: create UPD emdo file
+#-----------------------------------------------------------------------------------------------------------------
+function cr_upd_emdo() {
+  cat <<EOUPD >$FILENAME
+  emcli login -username=sysman
+  emcli sync
+  emcli modify_target -type='oracle_database' \\
+    -name='${ORACLE_SID}_S1.unix.lan' \\
+    -properties='OracleHome:${ORACLE_HOME}' \\
+    -on_agent
+  emcli modify_target -type='oracle_listener' \\
+    -name='LISTENER_${ORACLE_SID}_${FQDN_MACHINE}' \\
+    -properties='OracleHome:${ORACLE_HOME};ListenerOraDir:${TNS_ADMIN}' \\
+    -on_agent
+  emcli sync
+  emcli logout
+EOUPD
+
+  return
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: create ADD emdo file
+#-----------------------------------------------------------------------------------------------------------------
+function cr_add_emdo() {
+  cat <<STOPCAT >$FILENAME
+  emcli login -username=sysman
+  emcli sync
+
+  # Install and initialize agent
+  emcli submit_add_host \\
+    -host_names=${FQDN_MACHINE} \\
+    -platform=226 \\
+    -installation_base_directory=/app/oracle/product/em/agent_13 \\
+    -credential_name=ORACLE-OS-USER-SSHKEY \\
+    -port=3872 \\
+    -wait_for_completion
+
+  # Add database target
+  emcli add_target \\
+    -name="${ORACLE_SID}_S1.unix.lan" \\
+    -type="oracle_database" \\
+    -host="${FQDN_MACHINE}" \\
+    -credentials="UserName:dbsnmp;password:PWD_FILE;Role:SYSDBA" \\
+    -properties="SID=${ORACLE_SID}" \\
+    -properties="Port=${LSNR_PORT}" \\
+    -properties="OracleHome=${ORACLE_HOME}" \\
+    -properties="MachineName=${FQDN_MACHINE}" \\
+    -separator=properties="@" \\
+    -subseparator=properties="=" \\
+    -input_file="PWD_FILE:/app/oracle/admin/etc/pwddir/.pwdfile_emcli_dbsnmp"
+  emcli set_target_property_value \\
+    -property_records="${ORACLE_SID}_S1.unix.lan@oracle_database@LifeCycle Status@Production" \\
+    -property_records="${ORACLE_SID}_S1.unix.lan@oracle_database@Department@Standard" \\
+    -subseparator=property_records="@"
+
+  # Add listener target
+  emcli add_target \\
+    -name="${LSNR_NAME}_${FQDN_MACHINE}" \\
+    -type="oracle_listener" \\
+    -host="${FQDN_MACHINE}" \\
+    -properties="LsnrName=${LSNR_NAME}" \\
+    -properties="ListenerOraDir=${TNS_ADMIN}" \\
+    -properties="Port=${LSNR_PORT}" \\
+    -properties="OracleHome=${ORACLE_HOME}" \\
+    -properties="Machine=${FQDN_MACHINE}" \\
+    -separator=properties="@" \\
+    -subseparator=properties="="
+  emcli set_target_property_value \\
+    -property_records="${LSNR_NAME}_${FQDN_MACHINE}@oracle_listener@LifeCycle Status@Production" \\
+    -property_records="${LSNR_NAME}_${FQDN_MACHINE}@oracle_listener@Department@Standard" \\
+    -subseparator=property_records="@"
+  emcli set_target_property_value \\
+    -property_records="${FQDN_MACHINE}:3872@oracle_emd@LifeCycle Status@Production" \\
+    -property_records="${FQDN_MACHINE}:3872@oracle_emd@Department@Standard" \\
+    -subseparator=property_records="@"
+  emcli set_target_property_value \\
+    -property_records="${FQDN_MACHINE}@host@LifeCycle Status@Production" \\
+    -property_records="${FQDN_MACHINE}@host@Department@Standard" \\
+    -subseparator=property_records="@"
+
+  # Execute root.sh
+  ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bashrc; ROOTSH=\`find /app/oracle/product/em -name root.sh\`; sudo \$ROOTSH'
+
+  # Show all targets known by agent
+  echo
+  echo 'agent knows these targets:'
+  # ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bashrc; . /app/oracle/bin/dbset agent; emctl config agent listtargets'
+  ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bash_profile >/dev/null 2>&1; . dbset agent; emctl config agent listtargets'
+  echo
+
+  # Show all targets known by EM
+  echo
+  echo 'EM knows these targets:'
+  emcli list -resource=Targets -search="HOST_NAME='${FQDN_MACHINE}'" -columns="TARGET_NAME:70,TARGET_TYPE:50"
+  echo
+  echo 'subscribe and update to gold agent image'
+  echo
+  export EPOCH=\`date +"%s"\`
+  emcli subscribe_agents -image_name="GAI135" -agents="${FQDN_MACHINE}:3872"
+  emcli update_agents \\
+    -image_name="GAI135" \\
+    -agents="${FQDN_MACHINE}:3872" \\
+    -op_name="Update_Agent_${FQDN_MACHINE}_\${EPOCH}" \\
+    -runPostCleanup
+  OP_NAME="Update_Agent_${FQDN_MACHINE}_\${EPOCH}"
+  OP_NAME=\`echo \$OP_NAME|tr [a-z] [A-Z]\`
+  STATECMD="emcli get_agent_update_status -op_name=\"\${OP_NAME}\"|grep ${FQDN_MACHINE}|awk '{print \\\$2}'"
+  echo "STATECMD: \$STATECMD#"
+  bash -c "\$STATECMD" >/tmp/updatestate_\$EPOCH.out
+  UPDATESTATE=\`cat /tmp/updatestate_\$EPOCH.out\`
+
+  while [ "\$UPDATESTATE" != 'Success' ]
+  do
+    sleep 30
+    bash -c "\$STATECMD" >/tmp/updatestate_\$EPOCH.out
+    UPDATESTATE=\`cat /tmp/updatestate_\$EPOCH.out\`
+    echo "state of update: \$UPDATESTATE"
+    if [ "\$UPDATESTATE" == '' -o "\$UPDATESTATE" == 'NotUpdatable' ]
+    then
+      echo "error updating agent!"
+      exit 1
+    fi
+  done
+  echo "agent update ended with: \$UPDATESTATE"
+  rm /tmp/updatestate_\$EPOCH.out
+
+  ssh -o "StrictHostKeyChecking=no" -o "BatchMode=yes" ${FQDN_MACHINE} '. .bashrc; ROOTSH=/app/oracle/product/em/agent_13/GoldImage_v2/agent_13.5.0.0.0/root.sh; sudo \$ROOTSH'
+  echo
+  emcli sync
+  emcli logout
+STOPCAT
+
+return
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage() {
+  if [ $help -eq 1 ]
+  then
+    RC=0
+  else
+    RC=1
+  fi
+  -t[|--tnsadmin],
+  echo ""
+  echo "  Command     : $SCRIPTNAME $A_OS ACTION [$M_OS FQDN]  [$S_OS ORACLE_SID] [$P_OS PORT] [$O_OS ORACLE_HOME] [$T_OS TNS_ADMIN] [$H_OS]"
+  echo "  Description : $SCRIPTSHORTDESC"
+  echo ""
+  echo "  Parameters  : $(printf '%-15s' "$A_OPT") ,task to do in EM  (add | upd | del)"
+  echo "                $(printf '%-15s' "$M_OPT") ,fqdn (full qualified domain name), default: current machine name"
+  echo "                $(printf '%-15s' "$S_OPT") ,SID,                               default: current ORACLE_SID"
+  echo "                $(printf '%-15s' "$P_OPT") ,listener port,                     default: 1601"
+  echo "                $(printf '%-15s' "$O_OPT") ,oracle home,                       default: current ORACLE_HOME"
+  echo "                $(printf '%-15s' "$T_OPT") ,tns admin dir,                     default: current TNS_ADMIN"
+  echo "                $(printf '%-15s' "$W_OPT") ,wait a certain amount of seconds"
+  echo "                $(printf '%-15s' "$H_OPT") ,help screen"
+  echo ""
+  echo "  Example     : Creates an Enterprise Manager task file (.emdo) with the specified fqdn [lxexample.barmenia.lan]"
+  echo "                ${SCRIPTNAME} $M_OS lxexample.barmenia.lan"
+  echo ""
+  echo "                Creates an Enterprise Manager task file (.emdo) with the specified SID [XYZ]"
+  echo "                ${SCRIPTNAME} $S_OS XYZ"
+  echo ""
+  echo "                Creates an Enterprise Manager task file (.emdo) with the specified listener port [3303]"
+  echo "                ${SCRIPTNAME} $P_OS 3303"
+  echo ""
+  echo "                Creates an Enterprise Manager task file (.emdo) with the specified ORACLE_HOME Version"
+  echo "                ${SCRIPTNAME} $O_OS /app/oracle/product/xx.x.x/client"
+  echo ""
+  echo "                Will start the script with default values (if not host lxhko or lx0wj) in 120 seconds"
+  echo "                ${SCRIPTNAME} $W_OS 120"
+  echo ""
+  echo "                How to run the script as host lxhko or lx0wj no defaults, all params(-m, -s, -p, -o) must be set"
+  echo "                ${SCRIPTNAME} $M_OS lxexample.barmenia.lan $S_OS XYZ $P_OS 1608 $O_OS /app/oracle/product/xx.x.x/client"
+  echo ""
+  echo "$(tput setaf 1)  Attention   : This script must be started as user ORACLE!" #(tput setaf 1) = colour red
+  echo "                If this script will be executed as transferhost lx0wj or host lxhko all params MUST be specified!"
+  echo "                NO defaults available!$(tput sgr 0)" #resets colour
+  echo ""
+  exit $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+A_OS="-a"; A_OL="--action";             A_OPT="$A_OS[|$A_OL]"
+M_OS="-m"; M_OL="--machine";            M_OPT="$M_OS[|$M_OL]"
+S_OS="-s"; S_OL="--sid";                S_OPT="$S_OS[|$S_OL]"
+P_OS="-p"; P_OL="--port";               P_OPT="$P_OS[|$P_OL]"
+O_OS="-o"; O_OL="--orahome";            O_OPT="$O_OS[|$O_OL]"
+T_OS="-t"; T_OL="--tnsadmin";           T_OPT="$T_OS[|$T_OL]"
+W_OS="-w"; W_OL="--wait";               W_OPT="$W_OS[|$W_OL]"
+H_OS="-h"; H_OSa="-?"; H_OL="--help";   H_OPT="$H_OS[|$H_OSa|$H_OL]"
+
+help=0
+if [ $# -eq 0 ]
+then
+  MESSAGE="Option -a is mandatory!"
+  logger_fatal "$MESSAGE"
+  usage
+else
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      $A_OS | $A_OL )
+          action=1
+          ACTION="$2"
+          if [ -z $ACTION ]
+          then
+            MESSAGE="after option -a you have to give parameter add, upd or del!"
+            logger_error "$MESSAGE"
+            exit 1
+          fi
+          shift 2;;
+      $M_OS | $M_OL )
+          machine=1
+          FQDN_MACHINE="$2"
+          shift 2;;
+      $S_OS | $S_OL )
+          sid=1
+          ORACLE_SID="$2"
+          shift 2;;
+      $P_OS | $P_OL )
+          port=1
+          LSNR_PORT="$2"
+          check_digit $LSNR_PORT LSNR_PORT
+          shift 2;;
+      $O_OS | $O_OL )
+          orahome=1
+          ORACLE_HOME="$2"
+          shift 2;;
+      $T_OS | $T_OL )
+          tnsadmin=1
+          TNS_ADMIN="$2"
+          shift 2;;
+      $W_OS | $W_OL )
+          WAIT="$2"
+          check_digit $WAIT WAIT
+          wait=1
+          shift 2;;
+      $H_OS | $H_OSa | $H_OL )
+          help=1
+          usage;;
+      * ) usage;;
+    esac
+  done
+fi
+
+validate_params
+create_emdo_file
+exit 0

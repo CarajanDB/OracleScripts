@@ -1,0 +1,204 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAmigrate
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 0.7
+# @(#) Date        : 2021-04-14
+# @(#) Description : Migrate Database from Server 1 to Server 2 (e.g. from Redhat6 to Redhat7
+# @(#)
+# @@(#)  Change History:
+# @@(#)  Version  Date        Author        Description
+# @@(#)  ------------------------------------------------------------------------------------------------
+# @@(#)  0.1      2021-03-23  J. Ahrends    initial Script
+# @@(#)  0.2      2021-03-26  J. Ahrends    Activate Database
+# @@(#)  0.3      2021-04-07  J. Ahrends    Added CreatePFile
+# @@(#)  0.4      2021-04-07  J. Ahrends    Added 5 GB for each Filesystemcheck
+# @@(#)  0.5      2021-04-07  J. Ahrends    Removed Filesystemcheck
+# @@(#)  0.6      2021-04-13  J. Ahrends    Added config_huge_pages
+# @@(#)  0.6.1    2021-04-13  J. Ahrends    Added InstanceUp Check
+# @@(#)  0.7      2021-04-14  J. Ahrends    Added Function AddMemolock
+# @@(#)
+# @(#) ================================================================================================================
+
+#
+#
+# Set Variable BASEDIR if you want to test / develop
+#
+
+if [ -z "$BASEDIR" ]
+then
+   BASEDIR=/app/oracle/bin
+fi
+#
+# Read Oracle Library including Logger
+#
+source $BASEDIR/lib/ORAbaselib
+Parameter
+Logger
+
+# =================================================================================================
+#
+# Function Usage
+#
+# =================================================================================================
+
+usage() {
+   logger_info "Usage $0  -d | --database <DBUNIQUENAME> --oldhost <DBServer> [--oldport <PORT>] [--oraclehome <ORACLE_HOME>] --datasizemb <Size> --frasizemb <Size> [--port <PORT>] [--activate]"
+   logger_info "-d | --database <DBUNIQUENAME>: Unique  Name of the database"
+   logger_info "--oldhost <DBSERVER> Server, were the database is currently running on"
+   logger_info "--datasizemb <Size>  Current Size of Data Filesystem in MByte"
+   logger_info "--frasizemb <Size>  Current Size of FRA Filesystem in MByte"
+   logger_info "--oraclehome <ORACLE_HOME> ORACLE_HOME of old and new Database. Default $DEFAULTORACLEHOME"
+   logger_info "--oldport <PORT> Port of the source database"
+   logger_info "--port <PORT>  Listener Port of the database", Default $PORT
+   logger_info "--activate  Activates the standby database and opens it"
+   logger_info ""
+   logger_info "Example: $0 -d JOTESTK_S1 --oldhost lxuak --oldport 1601 --datasizemb 20000 --frasizemb 10000 -p 1601"
+   logger_info ""
+   logger_info "Hint: Setting X1 will skip Filesystem creation"
+   exit
+}
+
+# =================================================================================================
+#
+# Main
+#
+# =================================================================================================
+
+if [ $# -ne 0 ]
+then
+   ReadOptions $*
+   RC=$?
+   if [ $RC -ne 0 ]
+   then
+      usage
+   fi
+fi
+
+if [ "$DBNAME" = "NONE" ]
+then
+   logger_error "No Database Name specified" 
+   usage
+else
+   DB_UNIQUE_NAME=$DBNAME
+   DBNAME=`echo $DBNAME | awk -F_ '{ print $1 }'`
+   SITE=`echo $DB_UNIQUE_NAME | awk -F_ '{ print $2 }'`
+fi
+logger_debug DBNAME=$DBNAME
+logger_debug DB_UNIQUE_NAME=$DB_UNIQUE_NAME
+logger_debug SITE=$SITE
+#
+# Terminate if Instance is already running
+#
+InstanceUp $DBNAME
+if [ $? -ne 0 ]
+then
+   logger_info "Instance already running" 
+   exit 0
+fi
+
+if [ "$OLDHOST" = "NONE" ]
+then
+   logger_error "No Servername for oldserver specified" 
+   usage
+fi
+
+if [ "$ORACLE_HOME" = "NONE" ]
+then
+   ORACLE_HOME=$DEFAULTORACLEHOME
+fi
+
+if [[ $DATASIZEMB -lt $MINDATASIZEMB ]]  2>/dev/null
+then
+   logger_error "Invalid Size of Data Filesystem $DATASIZEMB (Min $MINDATASIZEMB)"
+   usage
+fi
+
+if [[ FRASIZEMB -lt $MINFRASIZEMB ]]  2>/dev/null
+then
+   logger_error "Invalid Size of FRA Filesystem $FRASIZEMB (Min $MINFRASIZEMB)"
+   usage
+fi
+
+if [[ $PORT -lt 1521 ]] 2>/dev/null
+then
+   logger_error "Invalid PORT $PORT"
+   usage
+fi
+
+if [ -z $OLDPORT ] 
+then
+   OLDPORT=$PORT
+fi
+#
+# Create Filesystems
+#
+if [ -z "$X1" ]
+then
+   CreateFS
+   if [ $? -ne 0 ]
+   then
+      exit 1
+   fi
+fi
+#CheckFilesystem ${DATAFILEDEST}/${DB_UNIQUE_NAME} `expr $DATASIZEMB - 5000`
+#if [ $? -ne 1 ]
+#then
+#   exit 11
+#fi
+#CheckFilesystem ${FRAFILEDEST}/${DB_UNIQUE_NAME} `expr $FRASIZEMB - 5000`
+#if [ $? -ne 1 ]
+#then
+#   exit 11
+#fi
+
+AddOratab
+OracleEnvironment $DBNAME
+export ORACLE_HOME
+logger_debug $ORACLE_HOME
+export ORACLE_SID
+LISTENER=LISTENER_${DBNAME}
+if [ -z "$X2" ]
+then
+   CreateListenerEntry
+   CreateSIDListListener
+   CreateTnsnamesEntry
+   ListenerStart
+   if [ $? -ne 0 ]
+   then
+      exit 5
+   fi
+fi 
+
+if [ -z "$X3" ]
+then
+   CreatePWFile
+   CreateInitdup
+   StartDummy
+   if [ $? -ne 0 ]
+   then
+      exit 6
+   fi
+   
+   RMANDuplicate
+   if [ $? -ne 0 ]
+   then
+      logger_error "Unable to duplicate target database $DBNAME"
+      exit 7
+   fi
+fi
+if [ "$ACTIVATE" -eq 1 ]
+then
+   NEWCONNECT="`hostname -s`:${PORT}/${DBNAME}"
+   ActivateStandby $NEWCONNECT
+   if [ $? -ne 0 ]
+   then
+      logger_error "Unable to activate Standby Database"
+      exit 8
+   fi
+fi
+CreatePFile
+source $BASEDIR/ORAlib
+config_huge_pages 1
+AddMemlock
+logger_info "Database Migration $DBNAME from $OLDHOST to `hostname -s` sucessful"
+exit 0

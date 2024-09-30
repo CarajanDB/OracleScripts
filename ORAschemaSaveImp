@@ -1,0 +1,329 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAschemaSaveImp
+# @(#) Author      : Dieter Smets
+# @(#)
+# @(#) Description : This script does execute Oracle Package BV$ENT.SCHEMA_SAVE.IMPORT
+# @(#)               either with a special EXPORT_TS or with LAST, which will identify the MAX EXPORT_TS of the Schema.
+# @(#)               Additionally a Target DB can be specified to prevent from taking a wrong SchemaSave from another Database.
+# @(#)
+# @(#)               Description:   http://lxwiki.unix.lan/wiki_root/dokuwiki/dokumentationen/doku.php?id=datenbanken:oracle:procedures:navstart#schemasave
+# @(#)                              http://wsv-muv.unix.lan/mediawiki/index.php/SchemaSave
+# @(#)
+# @(#) Parameters:   $1:   mandatory: Oracle TNS Service Name
+# @(#)               $2:   mandatory: Schema name
+# @(#)               $3:   mandatory: EXPORT_TS from SCHEMA_SAVE_MGMTAB / constant: LAST
+# @(#)               $4:   optional:  Source Database from SCHEMA_SAVE_MGMTAB
+# @(#)
+# @(#) Version     : 1.6
+# @(#) Datum       : 09.04.2024
+# @(#)
+# @(#) Presumption :
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)  1.0  2018-03-15  Smets       Created
+# @@(#)       2018-03-19  Smets       Translate Parm SCHEMA to uppercase.
+# @@(#)  1.1  2018-03-26  Smets       USAGE hinzugefuegt
+# @@(#)  1.2  2019-10-16  Smets       Aenderung Password Location fuer BVBTCUSR auf /app/oracle/admin/etc/pwddir
+# @@(#)  1.3  2020-06-05  Djuric      Umstellung Parameter auf Options
+# @@(#)                   Smets       Vorbereitung fuer Oracle 19c (Common Users)
+# @@(#)  1.4  2020-07-28  Smets       Korrektur fuer Vorbereitung fuer Oracle 19c
+# @@(#)  1.5  2021-01-08  Hoge        Vier Parameter hinzugefuegt NS_OPT,NTBS_OPT,XG_OPT,MIG_OPT
+# @@(#)  1.6  2024-04-08  Pils        Added "" for Oracle Password
+# @(#) ================================================================================================================
+set +x
+
+FILETS=`date +%Y%m%d_%H%M%S`
+CURDIR=`dirname $0`
+SYSOUTDIR=/app/oracle/admin/log
+SCRIPTSHORTDESC="This script does execute Oracle Package BV$ENT.SCHEMA_SAVE.IMPORT as descriebed here:
+
+                             http://lxwiki.unix.lan/wiki_root/dokuwiki/dokumentationen/doku.php?id=datenbanken:oracle:procedures:navstart#schemasave
+                             http://wsv-muv.unix.lan/mediawiki/index.php/SchemaSave
+"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : $(basename $0)"
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters  : $DB_OPT,		Oracle TNS Service Name"
+echo "                $S_OPT,			Schema Name"
+echo "                $TS_OPT,		EXPORT_TS from SCHEMA_SAVE_MGMTAB / constant: LAST"
+echo "                $TDB_OPT,		optional: Source Database from SCHEMA_SAVE_MGMTAB"
+echo "                $NS_OPT,		New Schema Name"
+echo "                $NTBS_OPT,	New Tabelspace"
+echo "                $XG_OPT,	Exclude Grants funktion"
+echo "                $MIG_OPT,		Migration von Version 12 zu Version 19"
+echo ""
+echo "  Example     : $(basename $0) $DB_OS psh-f $S_OS bvpshadm $TS_OS yyyymmdd-hhmmss"
+echo "                $(basename $0) $DB_OS psh-f $S_OS bvpshadm $TS_OS LAST [$TDB_OS PSHF]"
+echo "                $(basename $0) $DB_OS psh-e $S_OS bvsmh $TS_OS LAST $NS_OS bvsmh_imptest $NTBS_OS smhtst2"
+echo "                $(basename $0) $DB_OS psh-e $S_OS bvsmh $TS_OS LAST $NS_OS bvsmh_imptest $NTBS_OS smhtst2 $XG_OS"
+echo ""
+echo ""
+exit $RC
+}
+
+#-------------------------------------------------------------------------------------------
+#      Get Parameter
+#-------------------------------------------------------------------------------------------
+declare -A hash
+PRINTOUT=0	#Default DUMP Option
+DB_OS="-db"; DB_OL="--db_name";		DB_OPT="$DB_OS[|$DB_OL]"
+S_OS="-s"; S_OL="--schema";		S_OPT="$S_OS[|$S_OL]"
+TS_OS="-ts"; TS_OL="--timestamp";	TS_OPT="$TS_OS[|$TS_OL]"
+TDB_OS="-tdb"; TDB_OL="--target_db";	TDB_OPT="$TDB_OS[|$TDB_OL]"
+H_OS="-h"; H_OL="-?";			H_OPT="$H_OS[|$H_OL]"
+NS_OS="-ns"; NS_OL="--new_schema";	NS_OPT="$NS_OS[|$NS_OL]"
+NTBS_OS="-ntbs"; NTBS_OL="--new_tablespace";	NTBS_OPT="$NTBS_OS[|$NTBS_OL]"
+XG_OS="-xg"; XG_OL="--exclude_grants";	XG_OPT="$XG_OS[|$XG_OL]"
+MIG_OS="-mg19"; MIG_OL="--mig_to_19"; MIG_OPT="$MIG_OS[|$MIG_OL]"
+
+help=0
+if [ $# -eq 0 ]
+then
+   usage
+else
+   while [ $# -gt 0 ]; do
+     case "$1" in
+         $DB_OS | $DB_OL ) DBNAME="$2"
+                           DBNAME=`echo $DBNAME|tr [a-z] [A-Z]`
+                           DBNAME_LC=`echo $DBNAME|tr [A-Z] [a-z]`
+                           dbname=1
+                           shift 2;;
+         $S_OS | $S_OL )   DBSCHEMA="$2"
+                           DBSCHEMA=`echo $DBSCHEMA|tr [a-z] [A-Z]`
+                           dbschema=1
+                           hash[SCHEMA]=$(echo "$DBSCHEMA" | tr '[:lower:]' '[:upper:]')
+                           shift 2;;
+         $TS_OS | $TS_OL ) EXPORT_TS="$2"
+                           export_ts=1
+                           shift 2;;
+         $TDB_OS | $TDB_OL ) target_db=1
+                           TARGETDB="$2"
+                           shift 2;;
+         $H_OS | $H_OL )   help=1
+                           usage;;
+         $NS_OS | $NS_OL ) NEWSCHEMA="$2"
+         									 newschema=1
+         									 hash[NEW_SCHEMA]=$(echo "$NEWSCHEMA" | tr '[:lower:]' '[:upper:]')
+         									 shift 2;;
+         $NTBS_OS | $NTBS_OL ) NEWTABLESPACE="$2"
+         								 	 newtablespace=1
+         								 	 hash[NEW_TABLESPACE]=$(echo "$NEWTABLESPACE" | tr '[:lower:]' '[:upper:]')
+         								 	 shift 2;;
+         $XG_OS | $XG_OL )excludegrants=1
+         										hash[EXCLUDE_GRANTS]="Y"
+         										shift 1;;
+         $MIG_OS | $MIG_OL )migrationto19=1
+         										hash[MIG_12_TO_19]="Y"
+         										shift 1;;
+         * )               echo "*************************************************************"
+                           echo "* Parameter Error at '$1'"
+                           echo "*************************************************************"
+                           usage;;
+     esac
+   done
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the mandatory options
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" == "x$dbname" ]; then
+  MESSAGE="$DB_OPT Option is required!"
+  logger_error "$MESSAGE"
+  exit 1
+fi
+if [ "x" == "x$dbschema" ]; then
+  MESSAGE="$S_OPT Option is required!"
+  logger_error "$MESSAGE"
+  exit 1
+fi
+if [ "x" == "x$export_ts" ]; then
+  MESSAGE="$TS_OPT Option is required!"
+  logger_error "$MESSAGE"
+  exit 1
+fi
+#todo pruefen ob Parameter gesetzt sind die gesetzt werden muessen ??
+
+DATABASE=$DBNAME
+#DATABASE=$1
+DATABASE=$( echo "$DATABASE" | tr '[:lower:]' '[:upper:]' )
+#SCHEMA=$2
+SCHEMA=$DBSCHEMA
+SCHEMA=$( echo "$SCHEMA" | tr '[:lower:]' '[:upper:]' )
+#EXPORT_TS=$3
+EXPORT_TS=$( echo "$EXPORT_TS" | tr '[:lower:]' '[:upper:]' )
+#TARGETDB=$4
+TARGETDB=$( echo "$TARGETDB" | tr '[:lower:]' '[:upper:]' )
+
+SYSOUT=${SYSOUTDIR}/$(basename $0)-SYSOUT-${DATABASE}-${SCHEMA}-${FILETS}.log
+
+rm -f ${SYSOUT}
+
+function parameter()
+{
+	#export_ts erst hier hinzufuegen, damit wenn LAST angegeben wurde das in einen Wert umgewandelt werden kann vorher.
+	if [ 1 == $export_ts ]; then
+		hash+=([EXPORT_TS]=$EXPORT_TS)
+	fi
+
+	echo "Parameter fuer die Prozedur werden zusammengestellt"
+	parameterliste=()
+	for index in ${!hash[@]}
+	do
+	   #echo "$index => ${hash[$index]}" # in ein Array schreiben und dieses Dann der prozedur uebergeben
+	   parameterliste+="$index => '${hash[$index]}',"
+	   #echo "paras:"
+	   #echo "$parameterliste"
+	   #echo ""
+	done
+	#letztes komma bei der Parameterliste entfernen
+	parameter="${parameterliste%?}"
+	#echo "parameterliste:"
+	#echo "$parameterliste"
+	echo "Parameter die der Prozedur uebergeben werden: $parameter"
+}
+#if [ $# -eq 0 ]
+#then
+#   usage
+#fi
+
+# Get Password from PasswordFile:
+#XONOFF=$(set -o | awk '/^xtrace/ {print $2}')             # xtrace Zustand sichern
+#set -x
+PWDDIR=/app/oracle/admin/etc/pwddir
+#PASSFILE=/oranfs/share/ora_admin/dbapwd/.orapwd
+DBAUSER="BVBTCUSR"
+source $PWDDIR/.pwdfile_db_bvbtcusr
+DBAPASS=${PWDBVBTCUSR}
+
+SCRIPTNAME=$(basename $0)
+FILETS=`date +%Y%m%d_%H%M%S%N`
+## Determine Oracle Version:
+#TMPFILE=/tmp/$(basename $0)_$(date +%Y%m%d%H%M%S)
+#  (
+#sqlplus -s /nolog <<EOT
+#connect ${DBAUSER}/"${DBAPASS}"@${DATABASE}
+#set pagesize 0
+#select nvl(max(REGEXP_SUBSTR(VERSION,'[^.]+',1,1)), 'NO_ORA_VERSION') from dba_registry where comp_name = 'Oracle Database Catalog Views' ;
+#EOT
+#) > $TMPFILE
+#ORAVER=$(cat $TMPFILE)
+#if [ "${ORAVER}" == 'NO_ORA_VERSION' ]
+#   then
+#      echo "* No Oracle Version detected. Assume Version 12."
+#      ORAVER='12'
+#   else
+#      echo "* Oracle Version detected: ${ORAVER}"
+#fi
+#rm $TMPFILE
+#
+#if [ "${ORAVER}" == '19' ]
+#   then
+#     IMPPACK="schema_save_19c"
+#   else
+#     IMPPACK="schema_save"
+#fi
+
+cd ${CURDIR}
+RC=0
+# Wenn als Export_TS Parameter konstant LAST angegeben wird,
+#      wird der TS des letzten Export zum Schema ermittelt.
+# Wenn LAST spezifiziert ist, kann, optional, noch eine SOURCE DB (aus SCHEMA_SAVE_MGMTAB) spezifiziert werden.
+# Damit kann ausgeschlossen werden, dass ein SchemaSave des gleichnamigen Schemas,
+# z.B. aus einer anderen Stage, herangezogen wird.
+if [  ${EXPORT_TS} == 'LAST' ]
+  then
+  if [ "${TARGETDB}" == '' ]
+     then OPTWHERE=""
+     else OPTWHERE=" and DBNAME = '${TARGETDB}' "
+  fi
+
+  TMPFILE=/tmp/$(basename $0)_$(date +%Y%m%d%H%M%S)
+  (
+sqlplus -s /nolog <<EOT
+connect ${DBAUSER}/"${DBAPASS}"@${DATABASE}
+set pagesize 0
+select nvl(MAX(EXPORT_TS), 'NO_EXPORT_TS')
+  from BV\$ENT.DBA_SCHEMA_SAVE_MGMTAB
+ where schema = '${SCHEMA}' ${OPTWHERE} ;
+EOT
+) > $TMPFILE
+  EXPORT_TS=$(cat $TMPFILE)
+  if [ "${EXPORT_TS}" == 'NO_EXPORT_TS' ]
+     then
+        echo "*************************************************************"
+        echo "* Fehler bei Ausfuehrung $(basename $0) - RC=1"
+        echo "* NO Dumpfile ENTRY FOUND for specified Schema / Target DB"
+        RC=1
+        echo "*************************************************************"
+        rm $TMPFILE
+        exit 1
+  fi
+  rm $TMPFILE
+fi
+
+
+#aufruf parametr bestimmen
+parameter
+
+# Change Ownership of Log-Files to "oinstall":
+echo '' >>${SYSOUT}
+for LOGFILES in `find ${SYSOUTDIR} -name "$(basename $0)*" -user "$USER" -group barmstaf`
+do
+chgrp oinstall $LOGFILES
+done
+echo "All actions are logged in ${SYSOUT}!"
+
+START_TIME_ALL=$(date +%s);
+sqlplus /nolog <<EOT >> ${SYSOUT} 2>&1
+connect ${DBAUSER}/"${DBAPASS}"@${DATABASE}
+
+whenever sqlerror exit failure commit;
+whenever oserror exit failure commit;
+set sqlblanklines on;
+set serveroutput on;
+--spool ${SYSOUT}
+
+--EXECUTE schema_save.import('${SCHEMA}','${EXPORT_TS}') ;
+Begin
+--schema_save.import(SCHEMA=>'${SCHEMA}',EXPORT_TS=>'${EXPORT_TS}') ;
+schema_save.import($parameter) ;
+--EXCEPTION
+--   WHEN OTHERS THEN
+--      RAISE_APPLICATION_ERROR
+--      (-20005,'- SchemaSave Import Error');
+End;
+/
+quit;
+EOT
+
+RC=$?
+#cat ${SYSOUT}
+
+grep -Ec "SP2-[0-9][0-9][0-9][0-9]" ${SYSOUT} >/dev/null 2>&1
+if [[ $? -eq 0 || ${RC} -gt 0 ]]
+   then
+     echo "*************************************************************"
+     echo ""
+     echo "* Fehler bei Ausfuehrung schema_save.import - RC=$RC"
+     cat ${SYSOUT}
+     RC=1
+     echo "*************************************************************"
+fi
+
+END_TIME_ALL=$(date +%s);
+ELAPSED_TIME_ALL=`echo $((END_TIME_ALL-START_TIME_ALL)) | awk '{printf "%d:%02d:%02d", $1/3600, ($1/60)%60, $1%60}'`
+echo $(basename $0)' - Run Time: '${ELAPSED_TIME_ALL} >>${SYSOUT}
+echo $(basename $0)' - Run Time: '${ELAPSED_TIME_ALL}
+
+## Cleanup log-files older than DELDAY days:
+DELDAY="+1"        # Anzahl Tage fuers loeschen alter log Daten
+find ${SYSOUTDIR}/ -name "$(basename $0)-*.*" -mtime ${DELDAY} -type f -exec rm -f {} \;
+exit ${RC}

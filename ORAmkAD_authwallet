@@ -1,0 +1,255 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAmkAD_authwallet
+# @(#) Author      : Thorsten Thiel
+# @(#) Modified    : 
+# @(#)
+# @(#) Description : This script does all the things described after
+# @(#)               http://lxwiki.unix.lan/wiki_root/dokuwiki/dokumentationen/doku.php?id=datenbanken:oracle:oramkad_authwallet#manual_zu_oramkad_authwallet
+# @(#)
+# @(#) Version     : 1.2
+# @(#) Datum       : 17.03.2020
+# @(#)
+# @(#) Presumption : This script
+# @(#)                1. must be started as user ORACLE
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)    1.0   12.02.2020  Thiel       Created
+# @@(#)    1.1   12.02.2020  Thiel       oranfs-share has to be provided with passwordfile, too
+# @@(#)    1.1.1 12.02.2020  Thiel       cleanup keyfiles and related stuff
+# @@(#)    1.2   17.03.2020  Thiel       ORACLE_HOME has to be set for calling orapki
+# @(#) ================================================================================================================
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+source /app/oracle/bin/ORAlib
+HOST=`hostname -s`
+LONGHOST=`hostname -f`
+SHORTHOST=`hostname -s`
+TARFILE=${SHORTHOST}_barmCA_cert.tgz
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="does all the things described at
+
+                http://lxwiki.unix.lan/wiki_root/dokuwiki/dokumentationen/doku.php?id=datenbanken:oracle:oramkad_authwallet#manual_zu_oramkad_authwallet
+"
+WALLET_HOME=/app/oracle/admin/etc/wallet
+SCRIPTDIR=/app/oracle/bin
+source $SCRIPTDIR/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+   echo ".bash_functions file not found!"
+   exit $RC
+fi
+WHAT="$SCRIPTDIR/what"
+SCRIPTVERSION="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep 'Version     :'|awk '{print $3,$4,$5}'`"
+SCRIPTDATE="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep 'Date        :'|awk '{print $3,$4,$5}'`"
+
+Bmsg -m "# =============================================================================="
+Bmsg -m "$SCRIPTNAME - $SCRIPTSHORTDESC"
+Bmsg -m "# =============================================================================="
+STARTTIME=`date +"%Y-%m-%d %k:%M:%S.%N"`
+Bmsg -m "Start Time: $STARTTIME"
+
+Logger
+logger_info "$SCRIPTNAME gestartet"
+LOGDATE=`date +"%Y%m%d"`
+LOGFILE="/app/oracle/admin/log/${SCRIPTNAME}-${LOGDATE}.log"
+Bmsg -bm "All actions are logged in $LOGFILE!"
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+ACTIVE_USER=`id -un`
+if [ "$ACTIVE_USER" != "oracle" ]; then
+  MESSAGE="Script may not run as user $ACTIVE_USER, it must be started and run as oracle"
+  Bmsg -rm "$MESSAGE"
+  logger_fatal "$MESSAGE"
+  RC=255
+  MESSAGE="Error Code: ${RC}"
+  Bmsg -rm "$MESSAGE"
+  logger_fatal "$MESSAGE"
+  exit $RC
+fi
+
+if [ "$ORACLE_HOME" == '' ]
+then
+  MESSAGE="environment variable ORACLE_HOME is not set" 
+  Bmsg -rm "$MESSAGE"
+  logger_fatal "$MESSAGE"
+  RC=255
+  MESSAGE="Error Code: ${RC}"
+  Bmsg -rm "$MESSAGE"
+  logger_fatal "$MESSAGE"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     START of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     END of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+# 1) get SSL-Keys for this particular host
+echo
+MESSAGE="get SSL-Keys for $LONGHOST"
+Bmsg -bm "$MESSAGE"
+logger_info "$MESSAGE"
+curl "scep.unix.lan:8001/crt/${LONGHOST}/" >${TARFILE}
+if [ $? -ne 0 ]
+then
+   MESSAGE="couldn't retrieve SSL-keys!"
+   Bmsg -rm "$MESSAGE"
+   logger_fatal "$MESSAGE"
+   exit
+fi
+
+# 2) SSL-Keys entpacken
+MESSAGE="unpack ssl keys"
+Bmsg -bm "$MESSAGE"
+logger_info "$MESSAGE"
+tar zxf ${TARFILE}
+if [ $? -ne 0 ]
+then
+   MESSAGE="couldn't unpack SSL-keys!"
+   Bmsg -rm "$MESSAGE"
+   logger_fatal "$MESSAGE"
+   exit
+fi
+
+# 3) PKCS#12 Wallet erstellen
+echo
+MESSAGE="create PKCS#12 wallet"
+Bmsg -bm "$MESSAGE"
+logger_info "$MESSAGE"
+P12_WAL=/tmp/wallet.p12
+if [ -s $P12_WAL ]
+then
+   rm /tmp/wallet.p12 /tmp/wallet.jks 2>/dev/null
+fi
+
+JKS_PWD='oracle123'
+
+openssl pkcs12 -export \
+-in ./${LONGHOST}.crt \
+-inkey ./${LONGHOST}.key \
+-certfile ./barmenia-ca3.crt \
+-out $P12_WAL \
+-passout pass:$JKS_PWD
+
+if [ -s $P12_WAL ]
+then
+   MESSAGE="$P12_WAL created"
+   Bmsg -gm "$MESSAGE"
+   logger_info "$MESSAGE"
+else
+   MESSAGE="no pkcs12 wallet $P12_WAL"
+   Bmsg -rm "$MESSAGE"
+   logger_fatal "$MESSAGE"
+   exit
+fi
+
+if [ ! -d $WALLET_HOME ]
+then
+   mkdir -p $WALLET_HOME
+fi
+
+WALLET_DIR="$WALLET_HOME/adauth_wallet"
+# 4) PKCS#12 Wallet in ein JKS Format konvertieren
+echo
+MESSAGE="convert PKCS#12 wallet to jks format"
+Bmsg -bm "$MESSAGE"
+logger_info "$MESSAGE"
+if [ -d $WALLET_DIR ]
+then
+   rm -rf $WALLET_DIR
+fi
+JKS_WAL=/tmp/wallet.jks
+$ORACLE_HOME/bin/orapki wallet pkcs12_to_jks \
+ -wallet $P12_WAL \
+ -pwd $JKS_PWD \
+ -jksKeyStoreLoc $JKS_WAL \
+ -jksKeyStorepwd $JKS_PWD
+
+if  [ -s $JKS_WAL ]
+then
+   echo "$JKS_WAL erstellt"
+   MESSAGE="$JKS_WAL created"
+   Bmsg -gm "$MESSAGE"
+   logger_info "$MESSAGE"
+else
+   MESSAGE="no jks wallet $JKS_WAL"
+   Bmsg -rm "$MESSAGE"
+   logger_fatal "$MESSAGE"
+   exit
+fi
+
+# 5) Oracle Wallet erstellen
+echo
+MESSAGE="create ORACLE wallet"
+Bmsg -bm "$MESSAGE"
+logger_info "$MESSAGE"
+
+if [ ! -d $WALLET_DIR ]
+then
+   mkdir $WALLET_DIR
+fi
+#Wallet-Passwort definieren
+WAL_PWD='Qwertz#1'
+#Wallet-Passwort Passwortdatei erstellen
+PWDFILE='/app/oracle/admin/etc/pwddir/.pwdfile_ad_authwallet'
+echo "PWDADAUTH=$WAL_PWD" >$PWDFILE
+cp $PWDFILE /oranfs/share/ora_admin/SYSTEM/pwddir
+#Oracle Wallet erstellen
+$ORACLE_HOME/bin/orapki wallet create \
+-wallet $WALLET_DIR \
+-pwd $WAL_PWD >/dev/null
+if [ $? -ne 0 ]
+then
+   MESSAGE="couldn't $MESSAGE"
+   Bmsg -rm "$MESSAGE"
+   logger_fatal "$MESSAGE"
+   exit
+fi
+
+# 6) JKS Wallet in das Oracle Wallet importieren
+echo
+MESSAGE="import jks wallet into oracle wallet"
+Bmsg -bm "$MESSAGE"
+logger_info "$MESSAGE"
+$ORACLE_HOME/bin/orapki wallet jks_to_pkcs12 \
+ -wallet $WALLET_DIR \
+ -keystore $JKS_WAL \
+ -jkspwd oracle123 \
+ -pwd $WAL_PWD >/dev/null
+if [ $? -ne 0 ]
+then
+   MESSAGE="couldn't $MESSAGE"
+   Bmsg -rm "$MESSAGE"
+   logger_fatal "$MESSAGE"
+   exit
+fi
+
+# 7) Wallet-Inhalt anzeigen
+echo
+MESSAGE="display oracle wallet content"
+Bmsg -bm "$MESSAGE"
+logger_info "$MESSAGE"
+$ORACLE_HOME/bin/orapki wallet display \
+-wallet $WALLET_DIR \
+-pwd $WAL_PWD
+if [ $? -ne 0 ]
+then
+   MESSAGE="couldn't $MESSAGE"
+   Bmsg -rm "$MESSAGE"
+   logger_fatal "$MESSAGE"
+   exit
+fi
+
+
+# 8) temporaere Wallets loeschen
+rm $P12_WAL $JKS_WAL 2>/dev/null
+
+# 9) keyfiles loeschen
+rm $TARFILE barmenia-ca3.crt ${LONGHOST}.*

@@ -1,0 +1,155 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAverifypw
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.1
+# @(#) Date        : 2024-03-18
+# @(#) Description : Add Password verification to Profiles
+# @(#)
+# @@(#)  Change History:
+# @@(#)  Version  Date        Author        Description
+# @@(#)  ------------------------------------------------------------------------------------------------
+# @@(#)  0.1      2024-03-18  jahr          new version
+# @@(#)  1.1      2024-03-18  jahr          Create Verify Function and change profiles
+# @@(#)
+# @(#) ================================================================================================================
+
+#
+# Set Variable SCRIPTDIR if you want to test / develop
+#
+#
+if [ -z "$SCRIPTDIR" ]
+then
+  export SCRIPTDIR=/app/oracle/bin
+fi
+if [ -z "$ORABASEDIR" ]
+then
+  export ORABASEDIR=$ORACLE_BASE
+fi
+
+# Read Oracle Library including Logger
+#
+source $SCRIPTDIR/ORAlib
+source $SCRIPTDIR/ORACDBlib
+Logger _$2
+
+Parameter
+
+# =================================================================================================
+#
+# Function Usage
+#
+# =================================================================================================
+
+usage() {
+   logger_info "  Command     : $SCRIPTNAME"
+   logger_info "  Description : $SCRIPTSHORTDESC"
+   logger_info ""
+   logger_info "  Parameters  : -s | --servicename Service Name "
+   logger_info ""
+   logger_info "  Example     : $SCRIPTNAME --servicename CABC-K"
+   logger_info ""
+   logger_info "  Attention   : This script must be started as user ORACLE"
+   logger_info ""
+   exit 99
+}
+
+# =================================================================================================
+#
+# Read Script Options (getopt)
+#
+# Define Options
+#
+#  SHORT --> short option (e.g. -d)
+#  LONG --> long option (e.g. --database)
+#  : means that a second argument is required
+#
+# Return Values
+#   0 : Successful
+#  10 : Unsuccessful
+#  11 : Invalid Argument
+#
+# =================================================================================================
+
+ReadOptions() {
+   logger_debug "--> Function $FUNCNAME"
+   if [ $# -eq 0 ]
+   then
+      logger_fatal "Arguments required"
+      return 10
+   fi
+   SHORT="hs:"
+   LONG="help,servicename:"
+   logger_debug "LONG=$LONG"
+   logger_debug "Arguments=$*"
+   OPTIONS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@" 2>/dev/null)
+   RC=$?
+   logger_debug "OPTIONS=$OPTIONS"
+   if [ "$RC" -ne 0 ]
+   then
+      logger_fatal "Invalid Arguments"
+      return 11
+   fi
+
+   eval set -- $OPTIONS
+   while true
+   do
+      case $1 in
+           -h|--help)        usage
+                             shift;;
+           -s|--servicename) SERVICENAME="$2"
+                             logger_debug "SERVICENAME=$SERVICENAME"
+                             shift 2;;
+           --)               shift;break;;
+     esac
+   done
+   logger_debug "<-- Function $FUNCNAME"
+   return 0
+}
+
+# =================================================================================================
+#
+# Main
+#
+# =================================================================================================
+
+ReadOptions $*
+RC=$?
+if [ $RC -ne 0 ]
+then
+   usage
+fi
+
+# Check if Servicename is set
+
+if [ "$SERVICENAME" = "NONE" ]
+then
+   logger_error "Servicename not set"
+   usage
+fi
+RC=`$SCRIPTDIR/ORAtnsService -opt list -tnssrv "$SERVICENAME" |grep Entries |awk '{ print $5 }'`
+logger_debug "$RC"
+if [ "$RC" -ne 1 ]
+then
+   logger_error "Servicename $SERVICENAME does not exist"
+   exit 1
+fi
+
+VERIFYFUNCTION=$SCRIPTDIR/plsql/bvverifypw.sql
+logger_debug "VERIFYFUNCTION=$VERIFYFUNCTION"
+source $PWDDIR/.pwdfile_db_sys
+RunRemoteSQL sys $PWDSYS $SERVICENAME $VERIFYFUNCTION
+RC=$?
+if [ "$RC" -ne 0 ]
+then
+   logger_error "Unable to create Verify Function"
+   exit 2
+fi
+
+ModifyProfiles 
+RC=$?
+if [ "$RC" -ne 0 ]
+then
+   logger_error "Unable to alter Profile"
+   exit 3
+fi
+exit 0

@@ -1,0 +1,483 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#) File        : ORAmk_db_monitored
+# @(#) Author      : Thorsten Thiel
+# @(#) Modified    :
+# @(#)
+# @(#) Description : This script will insert suitable datasets into /app/QuestSoftware/Foglight/Oracle_Cli/ora.csv.
+# @(#)               Either on lxpssfms1ua or on lxpssfms1p depending which machine is needed.
+# @(#)
+# @(#) Version     : 2.3
+# @(#) Date        : 24.07.2024
+# @(#)
+# @(#) Attention   : This script must be started as user ORACLE!
+# @(#)
+# @@(#) Change History:
+# @@(#)
+# @@(#) 1.0    30.04.2016  Thiel  Created
+# @@(#) 1.1    09.08.2016  Thiel  in case of task create and col oud_done='1900-01-01 00:00:00.0'
+# @@(#)                           OUD-configuration will be done
+# @@(#) 1.2    22.11.2016  MPils  added .pwdfile_db_bvajc and .pwdfile_db_paomon
+# @@(#) 1.3    06.10.2017  MPils  added DOMAIN dependend INSLINE content
+# @@(#) 1.4    28.12.2017  Thiel  added function log_maint to remove old logfiles
+# @@(#)                           function log_maint expects value for KEEPDAYS
+# @@(#)                           added function check_digit
+# @@(#) 1.5    29.12.2017  Thiel  changed find command from ctime to atime to find old logs
+# @@(#) 1.6    02.07.2019  Thiel  change fgl_job_done to current date when instance is monitored already
+# @@(#) 1.6.1  02.07.2019  Thiel  log message
+# @@(#) 1.7    29.01.2020  Thiel  changed PWDDIR to /app/oracle/admin/etc/pwddir
+# @@(#) 1.8    29.01.2020  Thiel  ora.csv lines for the 'new' database that are commented out, have to be omitted
+# @@(#) 1.9    16.07.2021  HGE    deleted function check_digit; is provided by ORAlib
+# @@(#) 2.0    17.05.2022  HGE    changes for foglight 6.0 ua environment
+# @@(#) 2.0.1  17.05.2022  HGE    changes for sqlplus on dbahost
+# @@(#) 2.0.2  18.05.2022  HGE    changes for foglight ua automation
+# @@(#) 2.0.3  18.05.2022  HGE    enable pi in ora.csv
+# @@(#) 2.0.4  01.09.2022  HGE    changes for foglight p automation
+# @@(#) 2.1    09.04.2024  MPils  Added "" for Oracle Password
+# @@(#) 2.2    24.07.2024  Thiel  read monitoring user's name from AJC_DATA
+# @@(#) 2.3    25.07.2024  MPils  fixed grep -v '#' on ora.csv also working with c##paomon user
+# @(#) ================================================================================================================
+#set -x
+#set +x      #needed to hide passwords in shell variables from "set -x" bash execution (e.g. ControlM Logfile)
+
+#exit 0
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+source /app/oracle/bin/ORAlib
+#MAILTO="unix-dba@barmenia.de"
+#HOST=`hostname -s`
+#LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="searches for new entries in bv$ajc.ajc_data@dba-p and adds the database to foglight monitoring"
+BINDIR="/app/oracle/bin"
+TMPSQLOUT="/tmp/$SCRIPTNAME.tmp."`date +%s`
+DATASETFILE="/tmp/dataset_file_"`date +%s`
+#CSVDIR="/app/QuestSoftware/Foglight/Oracle_Cli"
+CSVDIR="/app/quest/barm_scripts/Oracle_Cli"
+ORACSV="${CSVDIR}/ora.csv"
+PWDDIR="/app/oracle/admin/etc/pwddir"
+
+source $PWDDIR/.pwdfile_db_bvajc
+source $PWDDIR/.pwdfile_db_paomon
+
+WHAT="$BINDIR/what"
+SCRIPTVERSION="`$WHAT /app/oracle/bin/$SCRIPTNAME|grep 'Version     :'|awk '{print $3,$4,$5}'`"
+SCRIPTDATE="`$WHAT /app/oracle/bin/$SCRIPTNAME|grep 'Date        :'|awk '{print $3,$4,$5}'`"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: comment_ora_csv
+#-----------------------------------------------------------------------------------------------------------------
+function comment_ora_csv()
+{
+MARK_SH="/tmp/mark_host_db_as_done.sh_"`date +%Y%m%d%H%M%S%N`
+#
+#der nachstehende Teil wird als Datei /tmp/mark_host_db_as_done.sh...
+#auf den passenden Foglight-Server geschickt und dort ausgefuehrt
+cat <<EOFILE >$MARK_SH
+if [ \$# -ne 1 ]
+then
+   cat <<EOCAT
+
+This script needs some information:
+
+       1. {LONGHOSTNAME}-{DB_INSTANCE}
+
+exit ...
+EOCAT
+exit 1
+fi
+
+FLAG="/tmp/mark_host_db_as_done.flag"
+if [ -e \$FLAG ]
+then
+   cat <<EOCAT
+The script mark_host_db_as_done.sh is running already!
+
+It is not allowed to run twice at the same time!
+
+exit ...
+EOCAT
+   exit 1
+else
+   >\$FLAG
+fi
+
+CHECKSTRING=\$1
+CLI_DIR="/app/quest/barm_scripts/Oracle_Cli"
+ORACSV="\${CLI_DIR}/ora.csv"
+TMPCSV=/tmp/ora.csv_\`date +%Y%m%d%H%M%S%N\`
+for ZEILE in \`cat \$ORACSV|sed s/' '/@/g\`
+do
+   echo \$ZEILE|grep \$CHECKSTRING >/dev/null
+   if [ \$? -eq 0 ]
+   then
+      echo "#\$ZEILE"|sed s/@/' '/g >>\$TMPCSV
+   else
+      echo "\$ZEILE" |sed s/@/' '/g >>\$TMPCSV
+   fi
+done
+mv \$TMPCSV \$ORACSV
+rm \$FLAG
+EOFILE
+
+#Datei $MARK_SH auf den Foglight-Host kopieren
+ERROR=`scp $MARK_SH quest@$FGL_HOST:$MARK_SH >/dev/null`
+
+rm $MARK_SH
+
+#Datei $MARK_SH auf dem Foglight-Host ausfuehren
+ERROR=`ssh quest@$FGL_HOST "chmod 740 $MARK_SH; $MARK_SH ${LONGHOSTNAME}-${DB_INSTANCE}; rm $MARK_SH;"`
+if [ $? -ne 0 ]
+then
+   logger_error "$ERROR"
+fi
+
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: update_ajc_data
+#-----------------------------------------------------------------------------------------------------------------
+function update_ajc_data()
+{
+${ORACLE_HOME}/sqlplus -s /nolog <<EOSQL >/dev/null
+connect "BV\$AJC"/"${PWDBVAJC}"@dba-p
+set serverout on size unlimited feedback off
+whenever sqlerror exit sql.sqlcode
+spool $TMPSQLOUT
+update ajc_data
+set fgl_job_done=sysdate
+where task='create'
+and nodename='$NODENAME'
+and db_instance='$DB_INSTANCE'
+and dgside='$DGSIDE'
+and FGL_JOB_DONE=to_date('01.01.1900','dd.mm.yyyy');
+EOSQL
+RC=$?
+if [ $RC -ne 0 ]; then
+   cat $TMPSQLOUT
+   exit
+fi
+rm $TMPSQLOUT
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: get_fgl_dataset_count
+#-----------------------------------------------------------------------------------------------------------------
+function get_fgl_dataset_count()
+{
+${ORACLE_HOME}/sqlplus -s /nolog <<EOSQL >/dev/null
+connect "BV\$AJC"/"${PWDBVAJC}"@dba-p
+set serverout on size unlimited feedback off
+whenever sqlerror exit sql.sqlcode
+spool $TMPSQLOUT
+declare
+  l_dataset_count     pls_integer  := 0;
+begin
+  select count(*)
+  into l_dataset_count
+  from AJC_DATA
+  where task='create'
+  and FGL_JOB_DONE=to_date('01.01.1900','dd.mm.yyyy');
+  dbms_output.put_line('DATASET_COUNT='||l_dataset_count);
+end;
+/
+EOSQL
+RC=$?
+if [ "$RC" -eq 0 ]; then
+   source $TMPSQLOUT
+   logger_info "$DATASET_COUNT databases have to be added to foglight monitoring"
+fi
+rm $TMPSQLOUT
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: get_oud_dataset_count
+#-----------------------------------------------------------------------------------------------------------------
+function get_oud_dataset_count()
+{
+${ORACLE_HOME}/sqlplus -s /nolog <<EOSQL >/dev/null
+connect "BV\$AJC"/"${PWDBVAJC}"@dba-p
+set serverout on size unlimited feedback off
+whenever sqlerror exit sql.sqlcode
+spool $TMPSQLOUT
+declare
+  l_oud_count     pls_integer  := 0;
+begin
+  select count(*)
+  into l_oud_count
+  from AJC_DATA
+  where task='create'
+  and OUD_DONE=to_date('01.01.1900','dd.mm.yyyy');
+  dbms_output.put_line('OUD_COUNT='||l_oud_count);
+end;
+/
+EOSQL
+RC=$?
+if [ "$RC" -eq 0 ]; then
+   source $TMPSQLOUT
+   logger_info "$OUD_COUNT databases have to be added OUD"
+fi
+rm $TMPSQLOUT
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: get_fgl_parms
+#-----------------------------------------------------------------------------------------------------------------
+function get_fgl_parms()
+{
+${ORACLE_HOME}/sqlplus -s /nolog <<EOSQL >/dev/null
+connect "BV\$AJC"/"${PWDBVAJC}"@dba-p
+set serverout on size unlimited feedback off hea off
+whenever sqlerror exit sql.sqlcode
+spool $TMPSQLOUT
+    select nodename||'|'||db_instance||'|'||dgside||'|'||lsnrport||'|'||mon_user as fgl_parms
+    from AJC_DATA
+    where task='create'
+    and FGL_JOB_DONE=to_date('01.01.1900','dd.mm.yyyy');
+EOSQL
+RC=$?
+if [ "$RC" -ne 0 ]; then
+   SQLOUT=`cat $TMPSQLOUT`
+   logger_error "$SQLOUT"
+   rm $TMPSQLOUT
+   logger_fatal "could not retrieve fgl_parms!"
+fi
+mv $TMPSQLOUT $DATASETFILE
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: log maintenance
+#-----------------------------------------------------------------------------------------------------------------
+function log_maint()
+{
+if [ $# -ne 1 ]
+then
+   echo "need a numeric value for KEEPDAYS"
+   echo "exit ..."
+   exit 1
+else
+   KEEPDAYS=$1
+   check_digit $KEEPDAYS KEEPDAYS
+   SCRIPTNAME=$(basename $0)
+   find /app/oracle/admin/log -name "${SCRIPTNAME}*" -atime +$KEEPDAYS -exec rm {} \;
+fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : ORArexec -pfile <target file> \ "
+echo "                         -os \"linux|aix|all\" \ "
+echo "                         -host \"<server grep pattern>\" | -db \"<db grep pattern>\" \ "
+echo "                         -c \"<command string>\" | -script <script file> "
+echo ""
+echo "  Parameters  : -os,         {optional}  target os type"
+echo "                -host,                   running remote on distinct host list"
+echo "                -db,                     running remote on  db list"
+echo "                -pfile,                  file with listed targets (host's/db's)"
+echo "                -c|-command,             command string for remote execution"
+echo "                -script,                 script for remote execution"
+echo "                -p1,         {optional}  parameter for usage in script"
+echo "                -showonly,   {optional}  don't execute ssh connection but shows it"
+echo "                -h,          {optional}  help screen"
+echo ""
+echo "  Example     : ORArexec -os aix -host \".*\" -pfile orahosts -script mybashscript"
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+echo "              : Please mind the '\"' around parameter values!"
+echo "              : Grep syntax use '.*' as 'any string' wildcard!"
+exit
+}
+
+#
+#-----------------------------------------------------------------------
+# Logger Script
+#-----------------------------------------------------------------------
+#
+logger() {
+if [ -r $BINDIR/log4sh ]
+then
+   LOCALLOGGER="`basename $0 | cut -d"." -f 1`_log4sh.properties"
+   if [ -r $BINDIR/${LOCALLOGGER} ]
+   then
+      LOG4SH_CONFIGURATION=$BINDIR/$LOCALLOGGER . $BINDIR/log4sh
+   else
+      LOG4SH_CONFIGURATION=$BINDIR/log4sh.properties . $BINDIR/log4sh
+   fi
+else
+   echo "ERROR: could not load (log4sh)" >&2
+   exit 1
+fi
+#  echo "LOG4SH_CONFIGURATION:$LOG4SH_CONFIGURATION"
+}
+
+logger
+logger_info "$SCRIPTVERSION"
+logger_info "$SCRIPTDATE"
+logger_info "$SCRIPTNAME gestartet"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  logger_error "Script may not run as user `id -un`, it must be started and run as oracle"
+  RC=255
+  logger_error "Error Code: ${RC}"
+  exit $RC
+fi
+
+###-----------------------------------------------------------------------------------------------------------------
+###     Get Parameter
+###-----------------------------------------------------------------------------------------------------------------
+##while true; do
+##  case "$1" in
+##    -os ) OS_PATTERN="$2";os=1; shift 2 ;;
+##    -host ) HOST_PATTERN="$2";host=1; shift 2 ;;
+##    -db ) DB_PATTERN="$2";db=1; shift 2 ;;
+##    -pfile ) PFILE="$2";pfile=1; shift 2 ;;
+##    -script ) SCRIPT="$2";script=1; shift 2 ;;
+##    -p1 ) P1="$2";p1=1; shift 2 ;;
+##    -c | -command ) COMMAND=$2;command=1; shift 2 ;;
+##    -showonly ) showonly=1; shift 1 ;;
+##    -h | --help ) usage ;;
+##    -- ) shift; break ;;
+##    * ) break ;;
+##  esac
+##done
+##
+###-----------------------------------------------------------------------------------------------------------------
+###     test to see if they gave the option
+###-----------------------------------------------------------------------------------------------------------------
+###if [ "x" != "x$host" ] && [ "x" != "x$db" ]; then
+###  echo "-host and -db [options] can't be used together"; echo ""; usage
+###fi
+##if [ "x" = "x$host" ] && [ "x" = "x$db" ]; then
+##  echo "-host or -db [option] is required"; echo ""; usage
+##fi
+##if [ "x" != "x$script" ] && [ "x" != "x$command" ]; then
+##  echo "-script and -c/-command [options] can't be used together"; echo ""; usage
+##fi
+##if [ "x" = "x$script" ] && [ "x" = "x$command" ]; then
+##  echo "-script or -c|-command [option] is required"; echo ""; usage
+##fi
+##if [ "x" = "x$pfile" ]; then
+##  echo "-pfile [option] is required"; echo ""; usage
+##fi
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Set Environment
+#-----------------------------------------------------------------------------------------------------------------
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+#INSLINE=",SINGLE,lxdqp.barmenia.lan-BPRP_s1,lxdqp.barmenia.lan,1601,SERVICE_NAME,BPRP_S1.unix.lan,paomon,Pao23Fog,,,True,UNIX,RSA_KEY,fogoracle,,,/app/QuestSoftware/Foglight/Oracle_Cli/fogoracle.key,,,,,,,"
+DATASET_COUNT=0
+get_fgl_dataset_count
+#echo "DATASETS: $DATASET_COUNT#"
+if [ $DATASET_COUNT -gt 0 ]
+then
+   get_fgl_parms
+   for DATASET in `cat $DATASETFILE`
+   do
+      NODENAME=`echo $DATASET|awk -F\| '{print $1}'`
+      DB_INSTANCE=`echo $DATASET|awk -F\| '{print $2}'`
+      DGSIDE=`echo $DATASET|awk -F\| '{print $3}'`
+      LSNRPORT=`echo $DATASET|awk -F\| '{print $4}'`
+      MONUSER=`echo $DATASET|awk -F\| '{print $5}'`
+#     echo "NODENAME: $NODENAME#"
+#     echo "DB_INSTANCE: $DB_INSTANCE#"
+#     echo "DGSIDE: $DGSIDE#"
+#     echo "LSNRPORT: $LSNRPORT#"
+#     echo "MONUSER: $MONUSER#"
+
+#Foglight-Host ermitteln
+      DB_ENV=`grep -o . <<<"$DB_INSTANCE"|tail -1|tr [a-z] [A-Z]`
+      if [ "$DB_ENV" == "P" -o "$DB_ENV" == "I" ]
+      then
+         #FGL_HOST="sysmgt04"
+         FGL_HOST="lxpssfms1p.barmenia.lan"
+      else
+         #FGL_HOST="sysmgt14"
+         FGL_HOST="lxpssfms1ua.barmenia.lan"
+      fi
+
+      LONGHOSTNAME=`nslookup $NODENAME|grep "^Name"|awk '{print $2}'`
+#     echo "LONGHOSTNAME: $LONGHOSTNAME#"
+
+      if [ "${DGSIDE}x" != "x" ]
+      then
+         ADDDGSIDE="_${DGSIDE}"
+      fi
+
+      logger_info "${LONGHOSTNAME}-${DB_INSTANCE}${ADDDGSIDE} will be added to foglight ($FGL_HOST)"
+
+      SERVICE_NAME="${DB_INSTANCE}${ADDDGSIDE}.unix.lan"
+#     echo "SERVICE_NAME: $SERVICE_NAME#"
+
+      INSLINE=",SINGLE,${LONGHOSTNAME}-${DB_INSTANCE}${ADDDGSIDE},${LONGHOSTNAME},$LSNRPORT,SERVICE_NAME,${SERVICE_NAME},${MONUSER},${PWDPAOMON},,,True,UNIX,RSA_KEY,fogoracle,,,/app/quest/barm_scripts/Oracle_Cli/fogoracle.key,,,,,,,,True,LISTENER_${DB_INSTANCE},,,,,"
+
+#     echo "$INSLINE"
+
+#pruefen, ob ora.csv die Zeile schon enthaelt (-> dann nicht noch einmal einfuegen)
+      SENDEN=`ssh -q -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3 quest@$FGL_HOST "grep ${LONGHOSTNAME}-${DB_INSTANCE}${ADDDGSIDE} $ORACSV|grep -v '^ *#' >/dev/null && echo SEND_NOT || echo SEND_OK"`
+      if [ "$SENDEN" == "SEND_OK" ]
+      then
+#ora.csv mit neuem Datensatz versehen
+         ssh quest@$FGL_HOST "echo $INSLINE >>$ORACSV"
+      else
+         logger_info "entry ${LONGHOSTNAME}-${DB_INSTANCE}${ADDDGSIDE} in ora.csv already exists!"
+      fi
+
+#orainst.sh auf foglight host ausfuehren
+      ssh quest@$FGL_HOST "cd $CSVDIR; ./orainst.sh >/dev/null"
+
+#Existenz der Status-Datei pruefen
+      STATUS_CSV="${CSVDIR}/DB_Definition/${LONGHOSTNAME}-${DB_INSTANCE}${ADDDGSIDE}_status.csv"
+#     echo "STATUS_CSV: $STATUS_CSV#"
+      EXIST=`ssh quest@$FGL_HOST "if [ -s $STATUS_CSV ]; then echo 'EXISTS'; else echo 'NOT'; fi"`
+      if [ "$EXIST" == "EXISTS" ]
+      then
+#Ergebnis pruefen
+         RESULT=`ssh quest@$FGL_HOST "grep SUCCESSFUL $STATUS_CSV >/dev/null && echo SUCCESS || echo FAILURE"`
+         if [ "$RESULT" == "SUCCESS" ]
+         then
+            logger_info "${RESULT}: ${LONGHOSTNAME}-${DB_INSTANCE}${ADDDGSIDE} added to foglight ($FGL_HOST)"
+#Tabelle ajc_data aktualisieren; fgl_jobs_done updaten
+            update_ajc_data
+#ora.csv-Zeile auskommentieren
+            comment_ora_csv
+         else
+            logger_info "${RESULT}: ${LONGHOSTNAME}-${DB_INSTANCE}${ADDDGSIDE} could not be added to foglight ($FGL_HOST)!"
+            FAILURE=`ssh quest@$FGL_HOST "cat $STATUS_CSV|awk -F'FAILED' '{print $2}'|tail -1"`
+#schon gemonitored?
+            echo $FAILURE|grep "The display name already exists." >/dev/null
+            if [ $? -eq 0 ]
+            then
+               update_ajc_data
+               logger_info "automatically set FGL_JOB_DONE to current date for ${LONGHOSTNAME}-${DB_INSTANCE}!"
+            else
+               logger_info "FAILURE: $FAILURE"
+            fi
+         fi
+      else
+         logger_info "FAILURE: ${LONGHOSTNAME}-${DB_INSTANCE}${ADDDGSIDE} could not be added to foglight ($FGL_HOST)!"
+         logger_info "FAILURE: Datei $STATUS_CSV existiert nicht!"
+      fi
+   done
+   rm $DATASETFILE 2>/dev/null
+   rm $TMPSQLOUT 2>/dev/null
+fi
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+log_maint 7
+logger_info "Ende"
+exit

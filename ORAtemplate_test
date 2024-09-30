@@ -1,0 +1,18 @@
+# @(#) ================================================================================================================
+# @(#) Name .........: ORAtemplate_test
+# @(#) Autor ........: Th. Thiel
+# @(#) Funktion .....: Test des script_templates
+# @(#) Version  .....: 0.1
+# @(#) Datum ........: 15.09.2017
+# @(#) Format .......: ORAtemplate_test
+# @(#) Beispiel .....: ORAtemplate_test
+#
+# @@(#) Beschreibung : Skript wurde aus dem script_template erstellt und prueft die Funktionalitaet
+# @@(#)                
+# @@(#) Aenderungen .:
+# @@(#) 0.1 15.09.2017 thi created
+# @(#) ================================================================================================================
+
+source ORAlib
+Logger
+log_header

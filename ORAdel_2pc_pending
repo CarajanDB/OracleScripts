@@ -1,0 +1,215 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAdel_2pc_pending
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 0.4
+# @(#) Date        : 2024-02-28
+# @(#) Description : Delete in doubt transactions
+# @(#)               Must run on target server
+# @(#)
+# @@(#)  Change History:
+# @@(#)  Version  Date        Author        Description
+# @@(#)  ------------------------------------------------------------------------------------------------
+# @@(#)  0.1      2024-01-03  J. Ahrends    initial Script
+# @@(#)  0.2      2024-01-04  J. Ahrends    added days to delete only older records
+# @@(#)  0.3      2024-01-04  J. Ahrends    Changed Skriptname 
+# @@(#)  0.4      2024-02-28  J. Ahrends    Removed SetOracleHome Function call
+# @@(#)
+# @(#) ================================================================================================================
+
+#
+# Read Oracle Library including Logger
+#
+if [ -z "$BASEDIR" ]
+then
+   BASEDIR=/app/oracle/bin
+fi
+DATUM=`date "+%y%m%d"`
+LOGFILE=/tmp/`basename -s .sh $0`_${DATUM}.log
+
+source ${BASEDIR}/ORAlib
+
+Logger 
+
+# =================================================================================================
+#
+# Usage
+#
+# =================================================================================================
+
+usage() {
+   logger_info "Usage $0 -l | -d | -t <tage> | -h"
+   logger_info "-l |--list   : List pending transaction"
+   logger_info "-d |--delete : Delete pending transaction"
+   logger_info "-t |--tage   : Delete pending transactions older than <tage> days"
+   logger_info "-h |--help   : This help" 
+   logger_info "Example: $0 -l -d -t 5"
+   exit 1
+}
+
+# =================================================================================================
+#
+# List Pending Transactions
+#
+# =================================================================================================
+
+ListPendingTransactions() {
+   logger_debug "--> ListPendingTransactions"
+   ${ORACLE_HOME}/bin/sqlplus -s / as sysdba  <<EOSQL
+      set lines 300 pages 100
+      col host format a50
+      col os_user format a50
+      set termout off trimspool on
+      spool $LOGFILE APPEND
+      SELECT local_tran_id, host, os_user, to_char(fail_time,'YYYY-MM-DD HH24:MI:SS') as fail_time, state 
+        FROM dba_2pc_pending
+       ORDER BY fail_time ;
+      spool off
+EOSQL
+   logger_info "Output was written into logfile $LOGFILE"
+   logger_debug "<-- ListPendingTransactions"
+}
+
+# =================================================================================================
+#
+# Delete Pending Transactions
+#
+# =================================================================================================
+
+DeletePendingTransactions() {
+   if [ -z "$TAGE" ]
+   then
+      TAGE=0
+   else
+      if [ "$TAGE" -eq "$TAGE" ] 2>/dev/null
+      then
+         logger_debug "TAGE=$TAGE"
+      else
+         logger_error "Invalid Number $TAGE"
+         exit 1
+      fi
+   fi
+   
+   logger_debug "-->DeletePendingTransactions"
+   ${ORACLE_HOME}/bin/sqlplus -s / as sysdba  <<EOSQL 
+      set lines 300 pages 100
+      col host format a50
+      col os_user format a50
+      set termout off trimspool on serveroutput on
+      spool $LOGFILE APPEND
+DECLARE
+   days NUMBER := $TAGE;
+BEGIN
+   FOR c_rec in (
+       SELECT local_tran_id, host, os_user, state, fail_time 
+         FROM dba_2pc_pending
+        WHERE fail_time <= sysdate - days)
+   LOOP
+      dbms_transaction.rollback_force(c_rec.local_tran_id);
+      dbms_transaction.purge_lost_db_entry(c_rec.local_tran_id);
+   END LOOP;
+END;
+/
+      spool off
+EOSQL
+   logger_info "Output was written into logfile $LOGFILE" 
+   logger_debug "<-- DeletePendingTransactions"
+}
+
+# =================================================================================================
+#
+# Read Script Options (getopt)
+#
+# Define Options
+#
+#  SHORT --> short option (e.g. -d)
+#  LONG --> long option (e.g. --database)
+#  : means that a second argument is required
+#
+#  Allowed Options are:
+# Return Values
+#
+#   0 : Successful
+#  10 : Unsuccessful
+#  11 : Invalid Argument
+#
+# =================================================================================================
+
+ReadOptions() {
+   logger_debug "--> Function ReadOption"
+   if [ $# -eq 0 ]
+   then
+      logger_fatal "Arguments required"
+      return 10
+   fi
+
+#
+# Parameter without ":" indicates a variable without a value. Examplee: --wait
+# Parameter with ":" indicates a variable with a value: Example --vip cohesity21
+# The Comma is the delimiter only in the LONG format
+#
+   SHORT="ldt:h"
+   LONG="list,delete,help,tage:"
+
+   logger_debug "SHORT=$SHORT"
+   logger_debug "LONG=$LONG"
+   logger_debug "arguments=$*"
+   OPTIONS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@" 2>/dev/null)
+   RC=$?
+   logger_debug "OPTIONS=$OPTIONS"
+   logger_debug "RC=$RC"
+   if [ "$RC" -ne 0 ]
+   then
+      logger_fatal "Invalid Arguments"
+      return 11
+   fi
+
+   eval set -- $OPTIONS
+   while true
+   do
+      case $1 in
+           -h|--help)      HELP=1
+                           shift;;
+           -l|--list)      LIST=1
+                           shift;;
+           -d|--delete)    DELETE=1
+                           shift;;
+           -t|--tage)      TAGE=$2
+                           shift  2;;
+           --)             shift;break;;
+      esac
+   done
+   return 0
+}
+
+# =================================================================================================
+#
+# Main
+#
+# =================================================================================================
+
+if [ $# -ne 0 ]
+then
+   ReadOptions $*
+   RC=$?
+   if [ $RC -ne 0 ]
+   then
+      usage
+   elif [ -n "$HELP" ]
+   then
+      usage
+   fi
+else
+   usage
+fi
+
+CheckInstanceON $ORACLE_SID
+logger_debug "Instance $ORACLE_SID is running"
+if [ ! -z "$LIST" ]
+then
+   ListPendingTransactions
+fi
+if [ ! -z "$DELETE" ]
+then
+   DeletePendingTransactions
+fi
+

@@ -1,0 +1,333 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#) File        : ORAmig_wrapper
+# @(#) Author      : Thorsten Thiel
+# @(#) Modified    :
+# @(#)
+# @(#) Description : This script does all the things described after
+# @(#)               http://lxwiki.unix.lan/wiki_root/dokuwiki/dokumentationen/doku.php?id=datenbanken:oracle:ORAmig_wrapper#ORAmig_wrapper
+# @(#)
+# @(#) Version     : 0.1.27
+# @(#) Datum       : 11.05.2021
+# @(#)
+# @(#) Presumption : This script
+# @(#)                1. must be started as user ORACLE
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)    0.1    29.03.2021  Thi      Created
+# @@(#)    0.1.1  30.03.2021  Thi      added function check_designated_OHs
+# @@(#)    0.1.2  30.03.2021  Thi      added function check_pwddir and copy_pwdfiles
+# @@(#)    0.1.3  30.03.2021  Thi      changed function check_designated_OHs
+# @@(#)    0.1.4  30.03.2021  Thi      changed for-loop handling
+# @@(#)    0.1.5  30.03.2021  Thi      call function check_ora_net_conf
+# @@(#)    0.1.6  30.03.2021  Thi      call function det_os_version
+# @@(#)    0.1.7  30.03.2021  Thi      do NOT define function get_cmdb_data in wrapper script
+# @@(#)    0.1.8  31.03.2021  Thi      determine os version first and regard when searching ORACLE_HOMEs
+# @@(#)    0.1.9  31.03.2021  smh      call function get_cmdb_data
+# @@(#)    0.1.10 31.03.2021  Thi      use string compare
+# @@(#)    0.1.11 31.03.2021  Thi      introduced DEBUG mode
+# @@(#)    0.1.12 31.03.2021  Thi      call function ShutSrcInst
+# @@(#)    0.1.13 31.03.2021  Thi      we need to know what host we are running on (SHORTHOST)
+# @@(#)    0.1.14 31.03.2021  Thi      added another safetybelt with DEBUG mode
+# @@(#)    0.1.15 01.04.2021  Thi      added another valid option ORAmigCtmHG
+# @@(#)    0.1.16 03.04.2021  Thi      changed initial wait time to 5 seconds
+# @@(#)    0.1.17 03.04.2021  Thi      minor change
+# @@(#)    0.1.18 06.04.2021  Thi      we need to call /app/oracle/bin/ORAmkAD_authwallet
+# @@(#)    0.1.19 07.04.2021  Smh      DEBUG off
+# @@(#)    0.1.20 12.04.2021  Thi      added option ORAmigConfigHugepages
+# @@(#)    0.1.21 12.04.2021  Thi      removed option ORAmigConfigHugepages, ORAmigrate configures hugepages
+# @@(#)    0.1.22 19.04.2021  Thi      call function det_active_OH
+# @@(#)    0.1.23 20.04.2021  Thi      added option to call function OraHosts
+# @@(#)    0.1.24 21.04.2021  Thi      added option to call function UsrLock
+# @@(#)    0.1.25 22.04.2021  Smh      added option to call function FinalMaintenance
+# @@(#)    0.1.26 22.04.2021  Smh      introduced variable WRAPPER_OPT
+# @@(#)    0.1.27 11.05.2021  Thi      before instance activation call RemoveDGConfig
+# @(#) ================================================================================================================
+WRAPPER_OPT=$1
+DEBUG=0   # productive mode
+#DEBUG=1   # debug mode
+DEBUGWAIT=0
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+source /app/oracle/bin/ORAlib
+RC=$?
+if [ $RC -ne 0 ]; then
+   echo "library ORAlib file not found!"
+   exit $RC
+fi
+
+MAILTO="unix-dba@barmenia.de"
+SENDER="unix-dba@barmenia.de"
+SENDMAIL=/usr/sbin/sendmail
+
+STARTTIME=`date +"%Y-%m-%d %k:%M:%S.%N"`
+
+Logger
+LOGDIR="/app/oracle/admin/log"
+LOGDATE=`date +"%Y%m%d"`
+LOGFILE="${LOGDIR}/${SCRIPTNAME}-${LOGDATE}.log"
+
+echo
+if [ $DEBUG -eq 0 ]
+then
+   MESSAGE="debugging is OFF!
+
+       !!!productive mode!!!
+"
+   logger_error "$MESSAGE"
+else
+   MESSAGE='debugging is ON!'
+   logger_info "$MESSAGE"
+fi
+
+echo
+MESSAGE="press ctrl-c to stop; or just wait $DEBUGWAIT seconds to continue..."
+logger_info "$MESSAGE"
+sleep $DEBUGWAIT
+
+SHORTHOST=`hostname -s`
+
+#include recommended libraries
+MIGLIBPATH=/app/oracle/bin
+for MIGLIB in $MIGLIBPATH/ORAmiglib_smh $MIGLIBPATH/ORAmiglib_thi
+do
+   if [ -s $MIGLIB ]
+   then
+      source $MIGLIB
+   else
+      logger_fatal "recommended library $MIGLIB not found!"
+      exit 1
+   fi
+done
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+ACTIVE_USER=`id -un`
+if [ "$ACTIVE_USER" != "oracle" ]; then
+  MESSAGE="Script may not run as user $ACTIVE_USER, it must be started and run as oracle"
+  logger_fatal "$MESSAGE"
+  RC=255
+  MESSAGE="Error Code: ${RC}"
+  logger_fatal "$MESSAGE"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     START of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: write help text to screen
+#-----------------------------------------------------------------------------------------------------------------
+function helptext2screen()
+{
+cat <<EOTXT
+This script requires just ONE parameter!
+You may choose between: ORAmigMonOff
+                        ORAmigUsrLock
+                        OraMigrate
+			ORAactivate
+			ORAmigAudClean
+			ORAmigShutSrcInst
+			ORAmigOraHosts
+                        ORAmigUnregEus
+                        ORAmigRegEus
+			ORAmigTnsSwitch
+                        ORAmigCtmHG
+			AutoUpgrade
+			FinalMaintenance
+EOTXT
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: check designated OHs
+#-----------------------------------------------------------------------------------------------------------------
+function check_designated_OHs()
+{
+MESSAGE="check designated OHs"
+logger_info "$MESSAGE"
+INVLOC=`grep inventory_loc /etc/oraInst.loc|awk -F= '{print $2}'`
+INVXML="${INVLOC}/ContentsXML/inventory.xml"
+OHS=`grep 'HOME NAME' $INVXML|grep -v -e agent -e REMOVED|awk -F\" '{print $4}'`
+for OH in $OHS
+do
+   echo $OH|grep db12 >/dev/null
+   if [ $? -eq 0 ]
+   then
+      DESIGNATED_12C_HOME=$OH
+      continue
+   fi
+   echo $OH|grep db19 >/dev/null
+   if [ $? -eq 0 ]
+   then
+      DESIGNATED_19C_HOME=$OH
+   fi
+done
+DOEXIT=0
+if [ ! -z $DESIGNATED_12C_HOME ]
+then
+   MESSAGE="found 12c home: $DESIGNATED_12C_HOME"
+   logger_info "$MESSAGE"
+else
+   MESSAGE='12c home not found!'
+   logger_error "$MESSAGE"
+   DOEXIT=1
+fi
+if [ ! -z $DESIGNATED_19C_HOME ]
+then
+   MESSAGE="found 19c home: $DESIGNATED_19C_HOME"
+   logger_info "$MESSAGE"
+else
+   if [ "$OS_VERSION" == '6.10' ]
+   then
+      MESSAGE="19c installation not necessary on $OS_VERSION systems!"
+      logger_error "$MESSAGE"
+   else
+      MESSAGE='19c home not found!'
+      logger_error "$MESSAGE"
+      DOEXIT=1
+   fi
+fi
+if [ $DOEXIT == 1 ]
+then
+   logger_error "not all recommended ORACLE_HOMEs found!"
+   exit 1
+fi
+ORACLE_HOME=$DESIGNATED_12C_HOME
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: copy pwdfiles to pwddir
+#-----------------------------------------------------------------------------------------------------------------
+function copy_pwdfiles()
+{
+MESSAGE="copy pwdfiles to pwddir"
+logger_info "$MESSAGE"
+PWDFILESRC=/oranfs/share/ora_admin/SYSTEM/pwddir
+if [ ! -d $PWDFILESRC ]
+then
+   MESSAGE="password file source directory not found!"
+   logger_error "$MESSAGE"
+   exit 1
+fi
+cp $PWDFILESRC/.pwdfile* $PWDDIR
+if [ $? -ne 0 ]
+then
+   MESSAGE="could not copy pwdfiles to PWDDIR!"
+   logger_error "$MESSAGE"
+   exit 1
+fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: check pwddir and files
+#-----------------------------------------------------------------------------------------------------------------
+function check_pwddir()
+{
+MESSAGE="check pwddir and files"
+logger_info "$MESSAGE"
+PWDDIR=/app/oracle/admin/etc/pwddir
+if [ ! -d $PWDDIR ]
+then
+   MESSAGE="directory >$PWDDIR< does not exist!"
+   logger_error "$MESSAGE"
+   mkdir -p $PWDDIR
+   if [ $? -ne 0 ]
+   then
+      MESSAGE="couldn't create directory >$PWDDIR<!"
+      logger_error "$MESSAGE"
+      exit 1
+   else
+      copy_pwdfiles
+   fi
+fi
+PWDFILE_DB_BVCMDB=$PWDDIR/.pwdfile_db_bvcmdb
+source $PWDFILE_DB_BVCMDB
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+if [ $help -eq 1 ]
+then
+   helptext2screen
+   RC=0
+else
+   helptext2screen
+   RC=1
+fi
+echo ""
+exit $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     END of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program
+#-----------------------------------------------------------------------------------------------------------------
+det_os_version
+
+check_designated_OHs
+
+check_pwddir
+
+check_ora_net_conf
+
+get_cmdb_data
+
+det_active_OH
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+help=0
+if [ $# -eq 0 -o $# -gt 1 ]
+then
+   usage
+else
+   while [ $# -gt 0 ]; do
+     case "$WRAPPER_OPT" in
+         'ORAmigMonOff'          ) MonOff
+	                           exit;;
+         'ORAmigUsrLock'         ) UsrLock
+	                           exit;;
+         'OraMigrate'            ) OraMigrate
+	                           exit;;
+         'ORAactivate'           ) RemoveDGConfig
+                                   ORAactivate
+	                           exit;;
+         'ORAmkAD_authwallet'    ) /app/oracle/bin/ORAmkAD_authwallet
+	                           exit;;
+         'ORAmigAudClean'        ) AudClean
+	                           exit;;
+	 'ORAmigShutSrcInst'     ) ShutSrcInst
+	                           exit;;
+	 'ORAmigOraHosts'        ) OraHosts
+	                           exit;;
+	 'ORAmigUnregEus'        ) UnregEus
+	                           exit;;
+	 'ORAmigRegEus'          ) RegEus
+	                           exit;;
+	 'ORAmigTnsSwitch'       ) TnsSwitch
+	                           exit;;
+	 'ORAmigCtmHG'           ) CtmHG
+	                           exit;;
+	 'AutoUpgrade'           ) AutoUpgrade
+	                           exit;;
+	 'FinalMaintenance'      ) FinalMaintenance
+	                           exit;;
+	 '-h'|'-H'|'-?'|'--help' ) help=1
+	                           usage;;
+                              *  ) usage;;
+     esac
+   done
+fi
+exit 0

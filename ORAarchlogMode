@@ -1,0 +1,232 @@
+#!/usr/bin/bash
+#============================================================================
+#  File        : ORAarchlogMode 
+#  Author      : Cedric Aaron Towstyka
+#  Modified    :
+#
+#  Description : This script can set the Achivelogmode to achivlog or noachivelog.
+#
+#  Version     : 1.4
+#  Datum       : 02.02.2023
+#
+#  Attention   : This script must be started as user ORACLE
+#
+#  Change History:
+#
+#    1.0  21.07.2021   TOW   Created Script
+#    1.1  22.07.2021   TOW   Small Changes
+#    1.2  28.07.2021   TOW   edit usage 
+#    1.3  02.02.2023   TOW   error handling and improve exits
+#    1.4  02.02.2023   TOW   logical error changed
+#============================================================================
+
+#-----------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------
+SCRIPTNAME=$(basename $0)
+LOGDIR="/app/logs"
+LOGFILE="${LOGDIR}/${SCRIPTNAME}_`date +%Y%m%d%H%M%S%N`.log"
+export ORACLE_SID=${ORACLE_SID_UC}
+source /app/oracle/bin/.bash_functions
+RC=0
+# 3 weil sonst eine Mode ausgelöst würde
+bool_mode=3
+#-----------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : $SCRIPTNAME"
+echo ""
+echo "  Parameters  : -sid                           Database Name"
+echo "                -l                             list status from database Archivelog / Noarchivelog"
+echo "                -am                            switch to noarchivelog- or archivelogmode"
+echo "              : -h                             help screen"
+echo ""
+echo "  Example     : $SCRIPTNAME -sid DBAK -l"
+echo "                $SCRIPTNAME -sid DBAK -am ARCHIVELOGMODE or NOARCHIVELOGMODE"
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+echo ""
+}
+
+#-----------------------------------------------------------------------------------
+#     FUNCTION: Check if database runs in archive log mode
+#-----------------------------------------------------------------------------------
+function check_archlogmode()
+{
+Bmsg -gm "Aktueller Logmode wird ausgelesen!"
+
+ARCHLOGMODE=$(sqlplus -s / as sysdba <<EOSQL 
+  set heading off;
+  select log_mode from v\$database;
+  exit;
+EOSQL
+)
+if [ $? -eq 0  ]
+   then 
+   if [ "$ARCHLOGMODE" != "ARCHIVELOG" ]; then
+     Bmsg -gm "v\$databse.log_mode = $ARCHLOGMODE"
+   fi
+else
+RC=$?
+Bmsg -rm "Error at SQL Statement" $RC
+exit 1
+fi
+
+}
+
+#-----------------------------------------------------------------------------------
+#     FUNCTION: switch database to archivelogmode
+#-----------------------------------------------------------------------------------
+function change_log_mode_to_archive()
+{
+
+    sqlplus -s / as sysdba <<EOSQL
+    prompt
+    prompt shutdown database ...
+    shutdown immediate
+    prompt startup database in mount mode ...
+    startup mount
+    prompt altering database ...
+    alter database archivelog;
+    prompt altering database open ...
+    alter database open;
+    exit
+EOSQL
+if [ $? -ne 0  ]
+then
+   RC=$?
+Bmsg -rm "Error at SQL Statment" $RC
+exit 1
+fi
+
+}
+
+#-----------------------------------------------------------------------------------
+#     FUNCTION: switch database to NOarchivelogmode
+#-----------------------------------------------------------------------------------
+
+function change_log_mode_to_NOarchive()
+{
+sqlplus -s / as sysdba <<EOSQL
+    prompt
+    prompt shutdown database ...
+    shutdown immediate
+    prompt startup database in mount mode ...
+    startup mount
+    prompt altering database ...
+    alter database noarchivelog;
+    prompt altering database open ...
+    alter database open;
+EOSQL
+if [ $? -ne 0  ]
+then
+   RC=$?
+Bmsg -rm "Error at SQL Statment" $RC
+exit 1
+fi
+
+}
+#-----------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -sid ) ORACLE_SID="$2"; sid=1; shift 2 ;;
+    -l | --list ) status_db=1; shift 1 ;;
+    -am | --archivemode )  MODE="$2";  switch_mode=1; shift 2 ;; 
+    -h | --help ) usage; exit; shift 1  ;;
+     * )  Bmsg -rm "****************************************************** "
+          Bmsg -rm "************ Parameter Error at $1 ******************* "
+          Bmsg -rm "****************************************************** "
+          usage;
+          exit 1 ;;
+  esac
+done
+
+#-----------------------------------------------------------------------------------
+#     test to see if they gave the option
+#-----------------------------------------------------------------------------------
+
+ #ist -l und -am gleichzeitig gesetzt, wenn ja fehler
+if [[ $status_db == 1 && $switch_mode == 1 ]]
+then
+   Bmsg -rm "You can only list OR change the arcivelogmode!"
+   exit 1
+fi
+
+# is SID is set
+if [ "x" == "x$sid" ]; then
+ Bmsg -rm "-sid | --oracle_sid [option] is required"; echo ""; usage
+ exit 1
+fi
+
+ORACLE_SID_LC=`echo $ORACLE_SID|tr 'A-Z' 'a-z'`
+ORACLE_SID_UC=`echo $ORACLE_SID|tr 'a-z' 'A-Z'`
+ORACLE_SID=$ORACLE_SID_UC
+
+#is SID on this host
+
+ORAtab_check=`grep $ORACLE_SID /etc/oratab` 
+if [ $? -eq 1 ]
+then 
+    Bmsg -rm "Please Check your ORACLE_SID"
+    exit 1
+fi
+
+
+if [ "x" == "x$switch_mode"  ]
+then :
+else
+   MODE_UC=`echo $MODE|tr 'a-z' 'A-Z' `
+   if [ $MODE_UC == "ARCHIVELOGMODE" ]
+   # Bool which mode | 1 Archive / 0 No Archive
+   then
+      Bmsg -gm "Database will change to ARCHIVELOGMODE"
+      bool_mode=1
+      #Aenderung für späteren Vereich
+      MODE_UC=ARCHIVELOG
+   elif [ $MODE_UC == "NOARCHIVELOGMODE" ]
+   then
+      Bmsg -gm "Database will change to noARCHIVELOGMODE"
+      bool_mode=0
+      #Aenderung für späteren Vergleich
+      MODE_UC=NOARCHIVELOG
+   else
+      Bmsg -rm "Nicht zulässiger Mode!"
+      Bmsg -rm "Abbruch des Programs"
+      Bmsg -rm "Use ARCHIVELOGMODE or NOARCHIVELOGMODE"
+      exit 1
+   fi
+fi
+#---------------------------------------------------------------------------------
+# MAIN
+#--------------------------------------------------------------------------------
+
+#Es wird immer der aktuelle Status ausgegeben!
+if [ $status_db==1 ]
+then
+   check_archlogmode
+fi
+
+#Änderung des Logmode
+if [ "x" != x$MODE ]
+then
+   if [ $ARCHLOGMODE == $MODE_UC ]
+   then
+      Bmsg -rm "Die Instanz befindet sich bereits im gewünschten Logmode!"
+      Bmsg -rm "Kein Switch veranlasst"
+   else
+      if [ $bool_mode == 1 ]
+      then
+        change_log_mode_to_archive
+      elif [ $bool_mode == 0  ]
+      then
+           change_log_mode_to_NOarchive
+     fi
+   fi
+fi
+exit 0

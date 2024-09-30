@@ -1,0 +1,702 @@
+#!/usr/bin/perl
+# @(#) ================================================================================================================
+# @(#) Name .........: ORAtnsService
+# @(#) Autor ........: Marcel Pils
+# @(#) Funktion .....: Manage tns service/alias entries in ldap dirctory (oud/ol7oud)
+# @(#) Version  .....: 2.5
+# @(#) Datum ........: 04.07.2024
+# @(#) Format .......: ORAtnsService -h
+# @(#) Beispiel .....: ORAtnsService -h
+#
+# @@(#) Beschreibung :
+# @@(#)                 List, add, remove, rename, copy, .. ldap directory tns service entries.
+# @@(#) Aenderungen .:
+# @@(#) 1.0 22.10.2014 M.Pils   Created
+# @@(#) 1.1 23.01.2017 M.Pils   Copy option added
+# @@(#) 1.2 25.01.2018 M.Pils   Changed pwddir location
+# @@(#) 1.3 02.10.2018 M.Pils   Added functions prod2act and act2prod
+# @@(#) 1.4 09.10.2018 M.Pils   Added functions get_dbname, tns_update_dbname and updated tns_add, confirmation_request
+# @@(#) 1.5 12.11.2018 Thiel    script has to deal with new oud environment oud2 (lxora1v5/lxora7n9)
+# @@(#)     14.11.2018 Thiel    minor change for error correction
+# @@(#)     27.11.2018 Thiel    minor change in function usage
+# @@(#) 1.6 28.11.2018 Thiel    when doing a fresh install ORACLE_HOME and PATH to sqlplus are not set in user's environment
+# @@(#) 1.7 26.06.2019 Thiel    new oud-vm were integrated into existing slb oud
+# @@(#) 1.8 26.06.2021 Ahrends  Added ADDRESS_LIST and FAILOVER=TRUE to Data Guard Service
+# @@(#) 1.9 04.07.2023 Thiel    read validldapsrv from ldap.ora
+# @@(#) 2.0 05.07.2023 Thiel    better variable declaration
+# @@(#) 2.1 06.07.2023 Thiel    set default ldapsrv equal to validldapsrv
+# @@(#) 2.2 06.07.2023 Thiel    remove oid stuff and replace with ol7oud stuff
+# @@(#) 2.3 01.02.2024 Pils     added option -ldapport and changed -ldapsrv parameter handling
+# @@(#) 2.4 05.04.2024 Pils     added "" around sqlplus user password for new pwd policy passwords
+# @@(#) 2.5 04.07.2024 Pils     added ; to v$database sql
+# @(#) ================================================================================================================
+
+use strict;
+use Time::Local;
+use Net::LDAP;
+use Net::LDAP::Entry;
+use Getopt::Long;
+use Switch;
+use Data::Dumper;
+
+# Import ORAlib package (ORAlib.pm)
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib dirname(abs_path $0);
+use ORAlib;
+
+my $scriptname=$0;
+my $scriptshortdesc="List, add, remove, tests tns services from/to ldap directory";
+my $ora_home=$ENV{'ORACLE_HOME'};
+my $sid=$ENV{'ORACLE_SID'};
+# my $dbuname=$ENV{'DBUNAME'};
+my $tnssrv_default = $sid;
+$tnssrv_default =~ tr/a-z/A-Z/;
+# produce standard db-tns-name based in db-sid (replace '<last character>' by '-<last character>')
+$tnssrv_default =~ s/(.)$/-$&/;
+
+#
+# Function: help routine
+#
+sub usage{
+  my $par1 = shift;
+  print "$par1\n";
+  print "  Command        : $scriptname\n";
+  print "  Description    : $scriptshortdesc.\n\n";
+  print "  Parameters     : -opt {option}               Default: list\n";
+  print "                    options: {list|test|add|remove|rename|copy|upddb|prod2act|act2prod}\n";
+  print "                   [-ldapsrv   {oud|hostname}] ldap server       Default: ldap.ora entry\n";
+  print "                   [-ldapport          {NNNN}] ldaps server port Default: ldap.ora entry\n";
+  print "                   [-tnssrv]                   tns-service or \n";
+  print "                                               search pattern     Default: $tnssrv_default\n";
+  print "                   [-dump]                     print whole ldap entry\n";
+  print "                   [-h]                        help screen\n";
+  print "                   [-type   {tns|eus|tns+eus}] NetClass type Default: tns\n";
+  print "                   [-filter                    ldap search filter sting\n";
+  print "                   [-f]                        force - suppress confirmation request\n";
+  print "  ---------------------------------------------------------------- \n";
+  print "  add            : -port                       database listener port\n";
+  print "                   -tnssrv                     tns-service-name   Default: equal to -sid\n";
+  print "                   [-sid]                      database sid       Default: $sid\n";
+  print "                   [-host]                     long hostname      Default: current host\n";
+  print "                   [-dghost1]                  long hostname of dguard side 1 \n";
+  print "                   [-dghost2]                  long hostname of dguard side 2 \n";
+  print "                   [-dbsrv]                    db service name    Default: $sid.unix.lan\n";
+  print "                   [-desc]                     description        Default: <blank>\n";
+  print "  ---------------------------------------------------------------- \n";
+  print "  upddb          :                             update description field for 'DB_NAME' if missing or changed\n";
+  print "  ---------------------------------------------------------------- \n";
+  print "  rename | copy  : [-newsrv]                   new tns-service \n";
+  print "  ---------------------------------------------------------------- \n";
+  print "  prod2act, act2prod \n";
+  print "                 : -sid                       database sid       Default: $sid\n";
+  print "                   [-showonly]                print search result only\n";
+  print "  ---------------------------------------------------------------- \n";
+  print "\n";
+  print "  Example        : $scriptname -opt add -port 1699\n";
+  print "                 : $scriptname -opt list -tnssrv \"*test*\"\n";
+  print "                 : $scriptname -opt list -tnssrv \"*test*\" -filter \"description=DB_NAME=DBTEST\"\n";
+  print "                 : $scriptname -opt test -tnssrv \"*test*\"\n";
+  print "                 : $scriptname -opt remove\n";
+  print "                 : $scriptname -opt rename -newsrv NEWTNSNAME\n";
+  print "                 : $scriptname -opt copy -newsrv NEWTNSNAME\n";
+  print "                 : $scriptname -opt add -dghost1 lxdg1 -dghost2 lxdg2 -port 1688\n";
+  print "                 : $scriptname -opt prod2act -showonly\n";
+  print "                 : $scriptname -opt act2prod -sid DBTEST\n";
+  print "\n";
+  print "  Attention      : Search is case insensitiv\n";
+  print "                 : Parameter values with wildcards should be quoted e.g. \"*test*\"\n";
+  #print "  Attention     : This script must be started as user ORACLE\n";
+  die ("\n");
+}
+
+#
+# Parameters
+#
+#my $host=$ENV{'HOSTNAME'};
+my $host=`hostname`;chomp $host;
+my $dghost1='';
+my $dghost2='';
+my $port='';
+my $tnssrv=$tnssrv_default;
+my $newsrv='';
+my $dbsrv='';
+my $desc=' ';
+my $option='list';
+my $ldapora='/app/oracle/admin/dbhome/network/admin/ldap.ora';
+my @oudname;
+my @oudstring;
+my @oudlongname;
+my $validldapport;
+my $line;
+
+# Get oud ldap server info from ldap.ora file
+my @ldaprec = get_ldap_server($ldapora);
+my $ldapsrv=$ldaprec[2];
+my $ldapport=$ldaprec[4];
+
+my $showonly=0;
+my $force=0;
+my $help=0;
+my $db='';
+#my $type='tns+eus';
+my $type='tns';
+my $filter='';
+my $dump=0;
+my $line='-' x 72 . "\n";
+my $output='short';
+
+my $act_suffix = '_actsave';
+my $act_desc = 'USAGE=actifio-mount';
+
+GetOptions (
+  'opt=s'      => \$option,
+  'host=s'     => \$host,
+  'dghost1=s'  => \$dghost1,
+  'dghost2=s'  => \$dghost2,
+  'port=s'     => \$port,
+  'sid=s'      => \$sid,
+  'tnssrv=s'   => \$tnssrv,
+  'newsrv=s'   => \$newsrv,
+  'dbsrv=s'    => \$dbsrv,
+  'desc=s'     => \$desc,
+  'ldapsrv=s'  => \$ldapsrv,
+  'ldapport=s' => \$ldapport,
+  'type=s'     => \$type,
+  'filter=s'   => \$filter,
+  'dump'       => \$dump,
+  'showonly'   => \$showonly,
+  'f'          => \$force,
+  'h|help'     => \$help
+) || usage("error in GetOption");
+if ($help==1) {usage()};
+$option =~ tr/A-Z/a-z/;
+$ldapsrv =~ tr/A-Z/a-z/;
+chomp $ldapsrv;
+$type =~ tr/A-Z/a-z/;
+
+if ($ora_home eq "") {usage("Error: environment variable ORACLE_HOME not set!\n")};
+if ($sid eq "") {usage("Parameter '-sid' have to be defined!\n")};
+if ($type ne "eus" and $type ne "tns" and $type ne "tns+eus") {usage("Parameter '-type' is missing or wrong value '$type'!\n")};
+if (("x$dghost1" eq "x" and "x$dghost2" ne "x") or ("x$dghost1" ne "x" and "x$dghost2" eq "x")) {usage("Both parameter '-dghost1' and '-dghost2' have to be defined!\n")};
+if ($option eq "rename" and "x$newsrv" eq "x") {usage("Parameter '-newsrv' have to be defined!\n")};
+if ($option eq "copy" and "x$newsrv" eq "x") {usage("Parameter '-newsrv' have to be defined!\n")};
+if ($filter ne "") {$filter = "($filter)"}
+if ($dump == 1) {$output = 'dump'}
+
+$tnssrv =~ tr/a-z/A-Z/;
+my $tnsstring;
+if ($option eq "add") {
+  if ($tnssrv eq "" and $sid eq "") {usage("Parameter '-tnssrv' or '-sid' are missing!\n")};
+  if ($port eq "") {usage("Parameter '-port' is missing!\n")};
+
+  ## SID darf nicht auf Kleinschreibung geaendert werden, da der DB Service vom Listener Case sensitive ausgewertet wird
+  ##my $sid_lc = $sid; $sid_lc =~ tr/A-Z/a-z/;
+  ##if ($dbsrv eq "") {$dbsrv = "$sid_lc.unix.lan"};
+  ##$dbsrv =~ tr/A-Z/a-z/;
+  if ($dbsrv eq "") {$dbsrv = "$sid.unix.lan"};
+  if ($dghost1 eq "") {
+    my $host_lc = $host; $host_lc =~ tr/A-Z/a-z/;
+    $tnsstring = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=$host_lc)(PORT=$port))(CONNECT_DATA=(SERVICE_NAME=$dbsrv)))";
+  } else {
+    my $dghost1_lc = $dghost1; $dghost1_lc =~ tr/A-Z/a-z/;
+    my $dghost2_lc = $dghost2; $dghost2_lc =~ tr/A-Z/a-z/;
+    $tnsstring = "(DESCRIPTION=(FAILOVER=ON)(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=$dghost1_lc)(PORT=$port))(ADDRESS=(PROTOCOL=TCP)(HOST=$dghost2_lc)(PORT=$port)))(CONNECT_DATA=(SERVICE_NAME=$dbsrv)))";
+  }
+}
+if ($option eq "prod2act" || $option eq "act2prod") {
+  if ($sid eq "") {usage("Parameter '-sid' is missing!\n")};
+}
+
+#
+# Variables
+#
+# my $param1=@ARGV[0];
+my $rcok="0"; my $rcokmsg="OK";
+my $rcwarn="1"; my $rcwarnmsg="WARNING";
+my $rcerror="2"; my $rcerrormsg="ERROR";
+
+my $pwddir='/app/oracle/admin/etc/pwddir';
+my $adminpwdfile; my $ldapserver; my $admincn; my $ou; my $srv;
+if ($ldapsrv eq "ol7oud")
+{
+  $srv='OL7OUD';
+  $ldapserver="ldaps://ol7oud.localdomain:9636";
+  # $ldapserver="ldaps://$ldapsrv:$ldapport";
+} elsif ($ldapsrv eq "oud") {
+  $srv='OUD';
+  $ldapserver="ldaps://oud.unix.lan:636";
+} else {
+  $ldapserver="ldaps://$ldapsrv:$ldapport";
+};
+print "Using connection $ldapserver\n";
+$admincn="cn=Directory Manager";
+$adminpwdfile=$pwddir . "/.pwdfile_oud_directorymanager";
+$ou = "cn=OracleContext,dc=unix,dc=lan";
+
+#
+# get oud admin pwd
+#
+open my $adminpwdfh, '<', $adminpwdfile or die "error opening $adminpwdfile: $!";
+my $adminpwd = do { local $/; <$adminpwdfh> };
+chomp $adminpwd;
+(my $rest1, $adminpwd, my $rest2) = split("'",$adminpwd,3);
+#print "rest:$rest pwd:$adminpwd\n";
+#print "user:$admincn\n";
+
+#
+# get db system pwd
+#
+my $systempwdfile = '/app/oracle/admin/etc/pwddir/.pwdfile_db_system';
+open my $systempwdfh, '<', $systempwdfile or die "error opening $systempwdfile: $!";
+my $systempwd = do { local $/; <$systempwdfh> };
+chomp $systempwd;
+(my $rest1, $systempwd, my $rest2) = split("'",$systempwd,3);
+
+
+my $selcount = 0;
+my $delcount = 0;
+my $rencount = 0;
+my $errcount = 0;
+my $copcount = 0;
+my $entry;
+my $ldapfilter='';
+
+#
+# Connect to LDAP-Servers
+#
+my $ldapConn = Net::LDAP->new($ldapserver, verify=>"none");
+my $result = $ldapConn->bind($admincn, password=>$adminpwd);
+$result->code && die "ERROR: unable to bind to LDAP Server!\n".$result->error."\n",$result->error_text."\n";
+
+#
+# Some functions now
+#
+sub get_dbname {
+  #
+  # select db_name from database referenced by given tns-service
+  #
+  my $tns = shift;        # parameter1: tns-service for database connection
+
+  # write sql temporary file because of escaping dollar sign doesn't work
+  open(FH, '>', '/tmp/ORAtnsService.sql') or die $!;
+  print FH q[select 'DB_NAME='||name from v$database;];
+  close(FH);
+
+  my $script = "
+$ora_home/bin/sqlplus -s /nolog <<EOSQL
+connect system/\"$systempwd\"\@$tns
+set head off echo off
+@/tmp/ORAtnsService.sql
+exit;
+EOSQL
+";
+  my $retmsg=`bash -c '$script'`;
+  my $ret=$? >>8;
+  #print Dumper($ret);
+  #print Dumper($retmsg);
+  #my $msg = `echo "$retmsg"|grep '^ORA-'`;
+  my $dbname = `echo "$retmsg"|grep '^DB_NAME='`;
+  chomp $dbname;
+  if ($dbname eq '' and $dump == 1){print $line; print $retmsg}
+  return $dbname;
+}
+
+sub set_filter{
+  if ( $type eq "tns" ) {
+    $ldapfilter="(objectClass=orclNetService)";
+  } elsif ( $type eq "eus" ) {
+    $ldapfilter="(objectClass=orclDBServer)";
+  } else {
+    $ldapfilter = "(|(objectClass=orclNetService)(objectClass=orclDBServer))";
+  }
+  if ( $tnssrv ne "" ){
+    $ldapfilter="(&$ldapfilter(cn=$tnssrv)$filter)" ;
+  } else {
+    $ldapfilter="(&$ldapfilter$filter)" ;
+  }
+  #print "filter:" . $ldapfilter . "\n";
+}
+
+sub search_entries{
+  my $out  = shift;    # parameter1: ['short'|'dump'|'silent']
+  my $type = shift;    # parameter1: ['test'|'']
+
+  # Get orclNetService entries from ldap server
+  my $result = $ldapConn->search(base=>$ou, filter=>$ldapfilter);
+  $result->code && die "ERROR: unable to find Base-DN!\n".$result->error."\n",$result->error_text."\n";
+  $selcount = $result->count;
+
+  if ($out eq 'silent') {return $result}
+  elsif ($out eq 'short') { print $line };
+  foreach $entry ($result->entries) {
+    if ( $type eq "test" ) {
+      my $mycn = $entry->get_value("cn");
+      my $retmsg=`tnsping $mycn 2>&1`;
+      my $ret=$? >>8;
+      my $msg = `echo "$retmsg"|grep '^TNS-'`;
+      if ($ret == 0) {
+        printf "tnsping,OK   ,%-20s,RC=$ret\n",$mycn;
+      } else {
+        printf "tnsping,ERROR,%-20s,RC=$ret,$msg",$mycn;
+      }
+    }
+    if ($out eq 'dump'){ $entry->dump }
+    elsif ($out eq 'short' and  $type ne 'test'){print $entry->dn."\n";}
+  }
+  return $result;
+}
+
+sub confirmation_request{
+  my $par1 = shift;
+  my $par2 = shift;
+  if ( $par1 eq "add") {
+    $entry->dump; print $line;
+    print "Do you want add this entry to ldap server $srv?\nPress 'y'|'n': ";
+  } elsif ( $par1 eq "upddb") {
+    print "Do you want update this entry to ldap server $srv?\nPress 'y'|'n': ";
+  } elsif ( $par1 eq "rename") {
+    print "Do you want rename this entry in ldap server $srv to '$par2'?\nPress 'y'|'n': ";
+  } elsif ( $par1 eq "copy") {
+    print "Do you want copy this entry in ldap server $srv to '$par2'?\nPress 'y'|'n': ";
+  } else {
+    print "Entries found in $srv: $selcount\n";
+    print "Do you want remove this entries from ldap server $srv?\nPress 'y'|'n': ";
+  }
+  my $input = <STDIN>;
+  chomp $input;
+  my $input_lc = $input; $input_lc =~ tr/A-Z/a-z/;
+  if ($input_lc ne "y") {die "Your answer: '$input' -> operation was canceled\n"};
+}
+
+sub subentry_delete {
+  my $par1 = shift;
+  my (@toBeSearched, @toBeDeleted);
+  @toBeSearched = ( $par1 );
+  while (@toBeSearched) {
+    $_ = shift @toBeSearched;
+    #push @toBeDeleted, $_;
+    for (
+      (
+        $ldapConn->search(
+            base => $_
+          , scope => 'one'
+          , filter => '(objectclass=*)'
+          , attrs => [ '1.1' ]
+        )
+      )->entries
+    ) {
+      push @toBeDeleted, $_->dn;
+      push @toBeSearched, $_->dn;
+    }
+  }
+  my $i = 0;
+  while (@toBeDeleted) {
+    #print "\nentry to delete: " . pop @toBeDeleted;
+    $ldapConn->delete(pop @toBeDeleted);
+  }
+}
+
+sub tns_add {
+  #
+  # add a new tns service to ldap directory
+        #
+  $entry = Net::LDAP::Entry->new();
+  $entry->dn("cn=$tnssrv,$ou");
+  #print $entry->dn . "\n";
+  $entry->add (
+    'objectclass'       => [ 'top','orclNetService' ],
+    'cn'                => $tnssrv,
+    'orclnetdescstring' => $tnsstring,
+    'description'       => $desc
+  );
+
+  my $dbname = get_dbname($tnsstring);
+  if ($dbname eq ''){
+    if ($force == 0){
+      die("ERROR: did not get a DB_NAME from database connection using '$tnsstring'!\n")
+    } else {
+      warn("WARN: did not get a DB_NAME from database connection using '$tnsstring' -> DB_NAME not set for actifio mount!\n")
+    }
+  } else {
+    $entry->add('description' => $dbname);
+  }
+
+  if ($force == 0) {confirmation_request("add")};
+  $result = $entry->update( $ldapConn );
+  if ($result->code) {
+    die("ERROR: failed to add entry!\n",$result->error."\n",$result->error_text."\n")
+  } else {
+    print "TNS service added " . $entry->dn . "\n" ;
+  }
+}
+
+sub tns_update_dbname {
+  # update "DB_NAME=<dbname>" entry if differe from current value
+  set_filter;
+  my $result = search_entries($output);
+  foreach $entry ($result->entries) {
+    #$entry->dump; print $line;
+    my $dn = $entry->dn;
+    my $cn = $entry->get_value("cn");
+    #my $db = $entry->get_value("description", asref => 1);
+
+    my $dbname = get_dbname($cn);
+    if ($dbname eq ''){
+      print "ERROR: did not got a DB_NAME from database connection to '$tnssrv' -> Entry skipped!\n";
+      $errcount++;
+      next;
+    }
+
+    my $entry2 = $entry->clone;
+    $entry2->changetype('modify');
+    my $ref = $entry2->get_value( 'description', asref => 1 );
+    foreach my $attr  ( @$ref ) {
+      if ( $attr =~ 'DB_NAME=' ) { $entry2->delete('description' => [ $attr ]); };
+    }
+    $entry2->add ('description' => $dbname);
+    #$entry2->dump; print $line;
+
+    my $d1 = $entry->ldif(change=>0);
+    my $d2 = $entry2->ldif(change=>0);
+    if ( $d1 eq $d2 ) {
+      print "ERROR: DB_NAME not changed for Base-DN: $dn -> update skipped!\n";
+      $errcount++;
+      next;
+    }
+
+    if ($dump == 1) {$entry2->dump; print $line}
+    if ($force == 0) {confirmation_request("upddb",$entry2)};
+    $result = $entry2->update( $ldapConn );
+
+    if($result->code) {
+            print "ERROR: Unable to update Base-DN: ".$result->error."\n";
+            $errcount++;
+    } else {
+            $copcount++;
+            print "Base-DN: $dn has been updated.\n";
+    }
+  }
+  print $line;
+  print "Entries found in $srv: ".$selcount."\n";
+  print "Entries updated in $srv: ".$copcount."\n";
+  print "Entries skipped in $srv: ".$errcount."\n\n";
+}
+
+
+sub dn_remove {
+  #
+  # remove a given DN
+  #
+  my $dn = shift;      # parameter1: dn to be removed
+
+  my $rc = 0;
+  subentry_delete "$dn";
+  $result = $ldapConn->delete($dn);
+  if($result->code) { $rc = 1; print "ERROR: Unable to delete Base-DN: ".$result->error."\n" }
+  else { print "Deleted Base-DN: ".$dn."\n" }
+  return $rc;
+}
+
+sub tns_remove {
+  # remove a tns service from ldap directory
+  #$type = "tns";
+  set_filter;
+  my $result = search_entries($output);
+  if ($force == 0 and $selcount > 0) {confirmation_request("remove")};
+  foreach $entry ($result->entries) {
+    #$entry->dump; print $line;
+    my $result = dn_remove($entry->dn);
+    if($result != 0) { $errcount++ } else { $delcount++ }
+  }
+  if ($dump == 0){ print $line };
+  print "Entries found in $srv: ".$selcount."\n";
+  print "Entries deleted in $srv: ".$delcount."\n";
+  print "Deletes failed  in $srv: ".$errcount."\n\n";
+}
+
+sub dn_rename {
+  #
+  # rename a given DN using a given new CN
+  #
+  my $dn = shift;        # parameter1: dn to rename
+  my $newcn = shift;     # parameter2: new cn
+  my $rc = 0;
+
+  #
+  # rename entry by using clone, modify and delete methods
+  #
+  #my $entry2 = $entry->clone;
+  #$entry2->changetype('add');
+  #$entry2->dn("cn=$newcn,$ou");
+  #$entry2->replace(cn => [ $newcn ]);
+  #$result = $entry2->update( $ldapConn );
+  #subentry_delete "$dn";
+  #$result = $ldapConn->delete($dn);
+  #
+
+  #
+  # rename by using moddn and replace cn
+  my $result = $ldapConn->moddn($dn, newrdn => 'cn='.$newcn);
+  my $rc = 0;
+  if($result->code) { $rc = 1 }
+  else {
+    $result = $ldapConn->modify("cn=$newcn,$ou", replace => { cn => [ $newcn ] });
+    if($result->code) { $rc = 1 }
+  }
+  if($rc == 1) {
+    print "ERROR: Unable to rename Base-DN: ".$result->error."\n";
+  } else {
+    print "Renamed Base-DN: ".$dn." to ".$newcn.",".$ou."\n";
+  }
+  return $rc
+}
+
+sub tns_rename {
+  #
+  # rename all found ldap DNs using a defined new CN
+  # one search result allowed only
+  #
+  set_filter;
+  my $result = search_entries($output);
+  if ($selcount > 1) { die("\nERROR: multiple entries found but only one accepted.\n")};
+  if ($force == 0 and $selcount > 0) {confirmation_request("rename",$newsrv.",".$ou)};
+  foreach $entry ($result->entries) {
+    my $result = dn_rename($entry->dn,$newsrv);
+    if($result != 0) { $errcount++ } else { $rencount++ }
+  }
+  print $line;
+  print "Entries found in $srv: ".$selcount."\n";
+  print "Entries renamed in $srv: ".$rencount."\n";
+  print "Renames failed  in $srv: ".$errcount."\n";
+}
+
+sub tns_copy {
+  # copy ldap entry DN
+  set_filter;
+  my $result = search_entries($output);
+  if ($selcount > 1) { die("\nERROR: multiple entries found but only one accepted.\n")};
+  if ($force == 0 and $selcount > 0) {confirmation_request("copy",$newsrv.",".$ou)};
+  foreach $entry ($result->entries) {
+    #$entry->dump; print $line;
+    my $dn = $entry->dn;
+    my $cn = $entry->get_value("cn");
+
+    my $entry2 = $entry->clone;
+    $entry2->changetype('add');
+    $entry2->dn("cn=$newsrv,$ou");
+    $entry2->replace(cn => [ $newsrv ]);
+    $result = $entry2->update( $ldapConn );
+
+    my $rc = 0;
+    if($result->code) {
+      $rc = 1;
+      print "ERROR: Unable to copy Base-DN: ".$result->error."\n";
+      $errcount++;
+    } else {
+      $copcount++;
+      print "Base-DN: ".$dn." has been copied to ".$newsrv.",".$ou."\n";
+    }
+  }
+  print $line;
+  print "Entries found in $srv: ".$selcount."\n";
+  print "Entries copy in $srv: ".$copcount."\n";
+  print "Copy failed  in $srv: ".$errcount."\n\n";
+}
+
+sub move_to_actifio_mount {
+  my $newconnstring = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orarecovery1.barmenia.lan)(PORT=1601))(CONNECT_DATA=(SERVICE_NAME=$sid.unix.lan)))";
+
+  # search ldap entry DNs
+  $ldapfilter="(&(objectClass=orclNetService)(!(cn=*$act_suffix))(!(description=$act_desc))(description=DB_NAME=$sid))";
+  my $result = search_entries('silent');
+  print $line if ($output ne 'dump');
+  foreach $entry ($result->entries) {
+    #if ($output eq 'dump') {$entry->dump; print $line} else {print $line; print $entry->dn."\n"};
+    if ($output eq 'dump') {$entry->dump} else {print $entry->dn."\n"};
+    if ($showonly != 0) {next};
+
+    my $dn = $entry->dn;
+    my $cn = $entry->get_value("cn");
+
+    # construct ne dn for actifio mount  based on source database dn
+    my $newcn = "$cn$act_suffix";
+    my $entry2 = $entry->clone;
+    $entry2->changetype('add');
+    $entry2->replace(orclNetDescString => [ $newconnstring ]);
+    $entry2->add(description => [ $act_desc ]);
+
+    # rename source database dn to one with actifio suffix
+    my $result = dn_rename($dn,$newcn);
+    if($result != 0) { $errcount++; next } else { $rencount++ }  # abort working on this entry if an error occured
+
+    # add new dn for actifio mount database
+    $result = $entry2->update( $ldapConn );
+    if($result->code) {
+            print "ERROR: Unable to add Base-DN: ".$result->error."\n";
+            $errcount++;
+    } else {
+            $copcount++;
+            print "Added Base-DN: ".$entry2->dn." \n";
+    }
+    if ($output eq 'dump'){$entry2->dump} else {print $line}
+  }
+  print $line if ($showonly != 0 or $output eq 'dump');
+  print "Entries found in $srv: ".$selcount."\n";
+  print "Entries renamed in $srv: ".$rencount."\n";
+  print "Entries added in $srv: ".$copcount."\n";
+  print "Entries failed in $srv: ".$errcount."\n";
+}
+
+sub move_from_actifio_mount {
+  # search ldap entry DNs
+  $ldapfilter="(&(objectClass=orclNetService)(!(cn=*$act_suffix))(description=$act_desc)(description=DB_NAME=$sid))";
+  my $result = search_entries('silent');
+  print $line if ($output ne 'dump');
+  foreach $entry ($result->entries) {
+    #if ($output eq 'dump') {$entry->dump; print $line} else {print $line; print $entry->dn."\n"};
+    if ($output eq 'dump') {$entry->dump} else {print $entry->dn."\n"};
+    if ($showonly != 0) {next};
+
+    my $dn = $entry->dn;
+    my $cn = $entry->get_value("cn");
+    my $orgdn = "cn=$cn$act_suffix,$ou";
+
+    # remove dn for actifio mount database
+    my $result = dn_remove($dn);
+    if($result != 0) { $errcount++; next } else { $delcount++ }  # abort working on this entry if an error occured
+
+    # rename source database dn removing actifio suffix
+    my $result = dn_rename($orgdn,$cn);
+    if($result != 0) { $errcount++ } else { $rencount++ }
+
+    if ($output eq 'dump'){
+      $ldapfilter = "(entrydn=cn=$cn,$ou)";
+      my $result = search_entries('dump');
+    } else {print $line}
+  }
+  print $line if ($showonly != 0 or $output eq 'dump');
+  print "Entries found in $srv: ".$selcount."\n";
+  print "Entries renamed in $srv: ".$rencount."\n";
+  print "Entries removed in $srv: ".$delcount."\n";
+  print "Entries failed in $srv: ".$errcount."\n";
+}
+
+#
+# Main program
+#
+switch ($option) {
+  case "upddb"    { tns_update_dbname }
+  case "add"      { tns_add }
+  case "rename"   { tns_rename }
+  case "remove"   { tns_remove }
+  case "copy"     { tns_copy }
+  case "test"     { set_filter; my $result = search_entries($output,'test') }    # test ldap entries with tnsping
+  case "list"     { set_filter; my $result = search_entries($output); print $line; print "Entries found in $srv: $selcount\n" }
+  case "prod2act" { move_to_actifio_mount }
+  case "act2prod" { move_from_actifio_mount }
+  else            { usage("Parameter '-opt' is missing or wrong value '$option'!\n") }
+}
+
+$result = $ldapConn->unbind;
+exit $rcok;

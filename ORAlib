@@ -1,0 +1,1018 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#) File        : ORAlib
+# @(#) Author      : Johannes Ahrends
+# @(#)
+# @(#) Version     : 3.8
+# @(#) Date        : 27.06.2024
+# @(#)
+# @(#) Description : Library with useful Oracle Functions
+# @(#) Functions:
+# @(#)   Logger:            Log4sh Logger
+# @(#)   readPWD:           Read Password from hidden file
+# @(#)   CreatePWD:         Create new orapw-File
+# @(#)   ORAtab:            Create entry in /etc/oratab
+# @(#)   RMANtab:           Create Entry in RMANtab
+# @(#)   CheckInstanceOFF:  Error if Instance is up
+# @(#)   CheckInstanceON:   Error if Instance is down
+# @(#)   CheckInstance:     Generic Instance check: 0 if instance is down 1 if up
+# @(#)   SetOracleHome:     Check and Set ORACLE_HOME
+# @(#)   CheckOHattached:   is OH attached: 0 if OH is attached, 1 if not attached, 2 error
+# @(#)   attachOH:          attach ORACLE_HOME: 0 if OH could be attached, 1 if could not be attached, 2 error
+# @(#)   detachOH:          detach ORACLE_HOME: 0 if OH could be detached, 1 if could not be detached, 2 error
+# @(#)   startInstance:     0 if instance could be started, 1 if could not be started, 2 error
+# @(#)   stopInstance:      0 if instance could be stopped, 1 if could not be stopped, 2 error
+# @(#)   checkORAerr:       checks content in file $SQLRESULT, 0 if no oracle error found, 1 if oracle error found
+# @(#)                      you may give a list of exception strings, eg. 'ORA-01109 ORA-16669'
+# @(#)   checkRMANerr:      checks content in file $SQLRESULT, 0 if no RMAN error found, 1 if RMAN error found
+# @(#)                      you may give a list of exception strings, eg. 'RMAN-03002 RMAN-06004'
+# @(#)   getDBvalues:       sets values for variables IS_PRIMARY, DBNAME, DBUNAME and DGUARD, 0 if ok, 1 if not ok
+# @(#)   det_def_rcvcatoid: ermittelt den DEFAULT rcvcat oid service
+# @(#)   det_used_rcvcatoid:ermittelt den aktuell benutzten rcvcat oid service
+# @(#)   det_used_cohclu:   ermittelt den aktuell benutzten cohesity cluster namen
+# @(#)   det_arc_stat:      ermittelt den archiver status, 0=Archiver STARTED, 1=Archiver STOPPED, 2=Fehler bei Pruefung
+# @(#)   config_huge_pages: configures the hugepages
+# @(#)   check_digit:       needs two parameters
+# @(#)   set_LDAPSERVER:    set LDAPSERVER
+# @(#)   CleanUp            Clean oratab entry and dbs files for an old database (like leftover from cloning)
+# @(#)
+# @(#) Syntax      : cannot run on it's own
+# @(#)
+# @(#) Attention   : Integrate in other scripts with: source ~/bin/ORAlib
+# @(#)
+# @(#) Presumption :
+#
+# @@(#) Change History:
+# @@(#)
+# @@(#) 1.0     14.08.2017 J. Ahrends New Skript
+# @@(#) 1.1     07.09.2017 THI        SCRIPTDIR-Definition aus Funktion logger herausgenommen und vorab global definiert
+# @@(#)                               da es einige alte Skripts gibt, die logger noch nicht nutzen
+# @@(#) 1.2     15.09.2017 THI        Funktion log_header erstellt; gibt eine Startmeldung, das Skriptdatum und die Skriptversion aus
+# @@(#) 1.3     30.11.2017 THI        Variable RMANTAB global definiert; nicht nur in Funktion RMANtab
+# @@(#) 1.4     30.11.2017 THI        Funktion det_def_rcvcatoid erstellt; ermittelt den DEFAULT rcvcat oid service
+# @@(#) 1.5     30.11.2017 THI        Funktion det_used_rcvcatoid erstellt; ermittelt den aktuell benutzten rcvcat oid service
+# @@(#) 1.6     18.12.2017 JAH        Loggerausgabe FARBE oder SW inklusive Header
+# @@(#) 1.7     25.01.2018 MPI        changed pwddir location
+# @@(#) 1.8     13.02.2018 THI        Funktion CheckOHattached erstellt; prueft, ob ein ORACLE_HOME im Inventory attached ist
+# @@(#) 1.9     14.02.2018 THI        Funktion attachOH erstellt; attached ein ORACLE_HOME im Inventory
+# @@(#) 2.0     02.03.2018 THI        Funktion detachOH erstellt; detached ein ORACLE_HOME im Inventory
+# @@(#) 2.1     02.03.2018 THI        Funktion startInstance erstellt
+# @@(#)                               Funktion stopInstance erstellt
+# @@(#)                               Funktion checkORAerr erstellt
+# @@(#)                               Funktion getDBvalues erstellt
+# @@(#) 2.2     29.03.2018 MPI        changed SCRIPTPATH variable declaration
+# @@(#) 2.3     21.09.2018 THI        changed function det_used_rcvcatoid to deal with multiple rmantab entries for same SID
+# @@(#) 2.4     10.10.2018 SMH        Funktion checkRMANerr erstellt
+# @@(#) 2.5     06.12.2018 THI        minor change in declaration of function startInstance
+# @@(#) 2.6     13.02.2019 THI        added function det_arc_stat
+# @@(#) 2.7     12.04.2021 THI        moved function config_huge_pages from ORAdeploy to library
+# @@(#) 2.7.1   12.04.2021 THI        removed Bmsg logging from function
+# @@(#) 2.8     13.04.2021 JOH        Added Flag to ignore sysctl -p command for later reboot
+# @@(#) 2.8.1   16.04.2021 THI        need a flag file for later reboot
+# @@(#) 2.8.2   05.07.2021 HGE        function readPWD expects parameter user name
+# @@(#) 2.9     16.07.2021 HGE        function check_digit added
+# @@(#) 2.9.1   26.07.2021 THI        function createPWD has to give username when calling readPWD
+# @@(#) 2.9.2   26.07.2021 HGE        function readPWD changed log message
+# @@(#) 2.9.3   21.02.2023 THI        function config_huge_pages needs ONE parameter; it will be checked
+# @@(#) 2.9.4   04.07.2023 THI        created function set_LDAPSERVER
+# @@(#) 2.9.5   07.07.2023 THI        check long path when searching rmantab template
+# @@(#) 2.9.6   31.07.2023 JOH        Change in CheckInstance to enable exact matching, Added CleanUp Function
+# @@(#) 3.0     22.09.2023 THI        added function det_used_cohclu
+# @@(#) 3.1     16.10.2023 JOH        added return code 0 to checkORAerr
+# @@(#) 3.2     02.02.2024 JOH        Variable SCRIPTDIR und ORABASEDIR
+# @@(#) 3.2.1   02.02.2024 JOH        logger_info mit Skriptaufruf
+# @@(#) 3.3     07.02.2024 MPI        function GetLdapServer added
+# @@(#) 3.4     11.03.2024 THI        changed orpapwd command
+# @@(#) 3.5     26.04.2024 MPI        added L4SH_DEBUGLOG to Logger() and log_header()
+# @@(#) 3.6     21.05.2024 MPI        added REINIT option to Logger() function and fixed config_huge_pages
+# @@(#) 3.7     07.06.2024 JAH        added FRAFILEDEST and DATAFILEDEST
+# @@(#) 3.8     27.06.2024 MPI        added ORABINDIR and DBABINDIR
+# @(#) ================================================================================================================
+#
+
+ORABINDIR="${ORABINDIR:-/app/oracle/bin}"
+SCRIPTDIR="$ORABINDIR"
+DBABINDIR="${DBABINDIR:-/app/dbacommon/bin/}"
+ORABASEDIR="${ORABASEDIR:-/app/oracle}"
+PWDDIR="$ORABASEDIR/admin/etc/pwddir"
+RMANTAB="$ORABASEDIR/admin/config/backup/rmantab"
+ORATAB=/etc/oratab
+DATAFILEDEST="${DATAFILEDEST:-/app/oracle/data}"
+FRAFILEDEST="${FRAFILEDEST:-/app/oracle/fra}"
+PARAMETER="$0 $*"
+
+# =================================================================================================
+#
+# Logger Script
+#
+# =================================================================================================
+
+Logger() {
+  local VARIABLE=$1
+  local REINIT=${2:-0}    # Set it to 1 if you run Logger() again in same shell
+  if [ -n "$COLORLOG" ]
+  then
+    LOG4SH=$SCRIPTDIR/log4shcolor
+  else
+    LOG4SH=$SCRIPTDIR/log4sh
+  fi
+  VARIABLE=''
+  if [ $# -gt 0 ]
+  then
+    VARIABLE=$1
+  fi
+  if [ -r $LOG4SH ]
+  then
+    if [ -r log4sh.properties ]
+    then
+      LOG4SH_CONFIGURATION="log4sh.properties"
+    else
+      LOG4SH_CONFIGURATION="$SCRIPTDIR/log4sh.properties"
+    fi
+    if [ "$REINIT" -eq 1 ]; then
+      # remove 'readonly variable' error output
+      LOG4SH_CONFIGURATION=$LOG4SH_CONFIGURATION . $LOG4SH 2>/dev/null
+    else
+      LOG4SH_CONFIGURATION=$LOG4SH_CONFIGURATION . $LOG4SH
+    fi
+  else
+    echo "ERROR: could not load (log4sh)" >&2
+    exit 1
+  fi
+  # Get debug log file from LOG4SH_CONFIGURATION
+  L4SH_DEBUGLOG=$(grep -i "log4sh.appender.barmPattern.File" $LOG4SH_CONFIGURATION |
+                  grep -v "^[ ]*#" | sed 's/ *log4sh.appender.barmPattern.File *= *//')
+  L4SH_DEBUGLOG=`eval echo $L4SH_DEBUGLOG`
+  log_header
+}
+
+# =================================================================================================
+#
+# Log Header
+#
+# =================================================================================================
+
+log_header() {
+   WHAT=$SCRIPTDIR/what
+   SCRIPTNAME=$(basename $0)
+   SCRIPTPATH=$(dirname $0)
+   SCRIPTVERSION="`$WHAT $SCRIPTPATH/$SCRIPTNAME|grep '# @(#) Version'|awk '{print $3,$4,$5}'`"
+   SCRIPTDATE="`$WHAT $SCRIPTPATH/$SCRIPTNAME|grep '# @(#) Datum'|awk '{print $3,$4,$5}'`"
+   logger_info "$SCRIPTNAME gestartet"
+   logger_info "$SCRIPTNAME $*"
+   logger_info "$SCRIPTVERSION"
+   logger_info "$SCRIPTDATE"
+   logger_info "$PARAMETER"
+   logger_info "$L4SH_DEBUGLOG"
+}
+
+# =================================================================================================
+#
+# Read Password from File
+#
+# =================================================================================================
+
+readPWD() {
+   logger_debug "--------> Function readPWD"
+   if [ $# -ne 1 ]
+   then
+      logger_error "function needs a user name!"
+      return 2
+   fi
+   PWD4NAME=$1
+   if [ -f $PWDDIR/.pwdfile_db_$PWD4NAME ]
+   then
+      source $PWDDIR/.pwdfile_db_$PWD4NAME
+   else
+      logger_error "No Passwordfile >.pwdfile_db_${PWD4NAME}<"
+      return 1
+   fi
+   return 0
+}
+
+
+# =================================================================================================
+#
+# Create Password File
+#
+# =================================================================================================
+
+CreatePWD() {
+   logger_debug "--------> Function CreatePWD"
+   readPWD sys
+   if [ $? -eq 0 ]
+   then
+      orapwd file=$ORACLE_HOME/dbs/orapw${ORACLE_SID} password=$PWDSYS format=12 force=y
+   else
+      logger_error "Cannot create Password File $ORACLE_HOME/dbs/orapw${ORACLE_SID}"
+      return 1
+   fi
+   return 0
+}
+
+
+# =================================================================================================
+#
+# Add entry in /etc/oratab
+#
+# =================================================================================================
+
+ORAtab() {
+   logger_debug "--------> Function ORAtab"
+   if [ ! -f "$ORATAB" ]
+   then
+      logger_error "$ORATAB does not exist"
+      logger_error "Please check and cleanup"
+      return 2
+   fi
+   if [ `grep $ORACLE_SID $ORATAB | wc -l` -eq 0 ]
+   then
+      echo "${ORACLE_SID}:${ORACLE_HOME}:Y" >> /etc/oratab
+   fi
+   return 0
+}
+
+# =================================================================================================
+#
+# check digit
+#
+# =================================================================================================
+
+function check_digit()
+{
+#prueft, ob es sich um eine Zahl handelt
+if [ $# -ne 2 ]
+then
+   MESSAGE="CHECK_DIGIT: this function needs two parameters: digit and param"
+   Bmsg -rm "$MESSAGE" 2>&1
+   logger_error "$MESSAGE"
+   exit 1
+fi
+DIGIT=$1 #zu pruefende Zahl
+PARAM=$2 #Name der Programmvariablen in der die Zahl genutzt werden soll fuer Fehlerausgabe
+PRUF_STRING=`echo $DIGIT|sed s/[0-9]//g`
+if [ "${PRUF_STRING}#" != "#" ]
+then
+   MESSAGE="parameter $PARAM should be an digit; found >$DIGIT<!"
+   Bmsg -rm "$MESSAGE" 2>&1
+   logger_error "$MESSAGE"
+   exit 1
+fi
+}
+
+# =================================================================================================
+#
+# determine DEFAULT rcvcat oid service from rmantab template
+#
+# =================================================================================================
+
+det_def_rcvcatoid() {
+RMANTABTEMPLATE=/app/oracle/bin/templates/rman/sample_rmantab
+if [ ! -s $RMANTABTEMPLATE ]
+then
+   logger_error "RMANTAB template does not exist"
+   exit 1
+fi
+DEFRCVCATOID=`awk -v SID=DEFAULT -F: '$1~SID {print $3}' $RMANTABTEMPLATE`
+if [ $? -ne 0 ]
+then
+   logger_error "DEFAULT rcvcat oid service could NOT be determined!"
+   exit 1
+fi
+}
+
+# =================================================================================================
+#
+# determine actually used cohesity cluster name from rmantab
+#
+# =================================================================================================
+
+det_used_cohclu() {
+COHCLU=`grep $ORACLE_SID $RMANTAB|grep -v "^#"|awk '{print $NF}'`
+if [ $? -ne 0 ]
+then
+   logger_error "actually used cohesity cluster name could NOT be determined!"
+   exit 1
+fi
+}
+
+# =================================================================================================
+#
+# determine actually used rcvcat oid service from rmantab
+#
+# =================================================================================================
+
+det_used_rcvcatoid() {
+RCVCATOID=`awk -v SID="$ORACLE_SID" -F: '$1==SID {print $3}' $RMANTAB|head -1`
+if [ $? -ne 0 ]
+then
+   logger_error "actually used rcvcat oid service could NOT be determined!"
+   exit 1
+fi
+}
+
+# =================================================================================================
+#
+# Add entry in /app/oracle/admin/config/backup/rmantab
+#
+# =================================================================================================
+
+RMANtab() {
+   logger_debug "--------> Function RMANtab"
+
+   if [ -f "$RMANTAB" ]
+   then
+      if [ `grep ^${ORACLE_SID} $RMANTAB | wc -l` -eq 0 ]
+      then
+         logger_debug "mv $RMANTAB $RMANTAB.`date "+%y-%m-%d_%H:%M:%S"`"
+         mv $RMANTAB $RMANTAB.`date "+%y-%m-%d_%H:%M:%S"`
+      else
+         return 0
+      fi
+   fi
+   cat > $RMANTAB <<EOTAB
+#SID:Backuptype:Catalog:User
+${ORACLE_SID}:online:rcvcat:rman
+EOTAB
+   logger_debug "File $RMANTAB created"
+   return 0
+}
+
+# =================================================================================================
+#
+# Check Instance OFF
+#
+# =================================================================================================
+
+CheckInstanceOFF() {
+   logger_debug "--------> Function CheckInstanceOFF"
+   CheckInstance $1
+   if [ $? -eq 1 ]
+   then
+      logger_error "Instance $1 is Running!"
+      exit 10
+   fi
+   return 0
+}
+
+
+# =================================================================================================
+#
+# Check Instance ON
+#
+# =================================================================================================
+
+CheckInstanceON() {
+   logger_debug "--------> Function CheckInstanceON"
+   CheckInstance $1
+   if [ $? -eq 0 ]
+   then
+      logger_error "Instance $1 is not Running!"
+      exit 11
+   fi
+   return 0
+}
+
+# =================================================================================================
+#
+# Check Instance
+#
+# =================================================================================================
+
+CheckInstance() {
+   logger_debug "--------> Function CheckInstance"
+   Loracle_sid=$1
+   logger_debug "CMD=ps -ef|awk '{ print \$8 }' |grep -xc ora_pmon_${Loracle_sid}"
+   RC=`ps -ef|awk '{ print \$8 }' |grep -xc ora_pmon_${Loracle_sid}`
+   logger_debug "RC=$RC"
+#   return `ps -ef|grep pmon_${Loracle_sid} |grep -v grep | wc -l`
+   return $RC
+}
+
+# =================================================================================================
+#
+# attach ORACLE_HOME
+#
+# =================================================================================================
+
+attachOH() {
+   if [ $# -ne 1 ]
+   then
+      logger_debug "--------> Function attacheOH"
+      logger_error "function needs a path!"
+      return 2
+   fi
+   logger_debug "--------> Function attacheOH"
+   OH_PATH=$1
+   logger_info "ORACLE_HOME >$OH_PATH< soll attached werden!"
+   if [ ! -d $OH_PATH ]
+   then
+      logger_error "directory >$OH_PATH< does not exist!"
+      return 2
+   fi
+   if [ -z $ORACLE_HOME ]
+   then
+      logger_error "Die Umgebungsvariable >ORACLE_HOME< ist nicht gesetzt!"
+      return 2
+   fi
+   OH_NAME=`basename $OH_PATH`
+   CMD="$ORACLE_HOME/oui/bin/runInstaller -ignoreSysPrereqs -attachHome ORACLE_HOME=\"$OH_PATH\" ORACLE_HOME_NAME=\"$OH_NAME\""
+   logger_info "$CMD"
+   bash -c "$CMD"
+   if [ $? -ne 0 ]
+   then
+      logger_error "ORACLE_HOME >$OH_PATH< konnte nicht attached werden!"
+      return 2
+   fi
+}
+
+# =================================================================================================
+#
+# detach ORACLE_HOME
+#
+# =================================================================================================
+
+detachOH() {
+   if [ $# -ne 1 ]
+   then
+      logger_debug "--------> Function detacheOH"
+      logger_error "function needs a path!"
+      return 2
+   fi
+   logger_debug "--------> Function detacheOH"
+   OH_PATH=$1
+   logger_info "ORACLE_HOME >$OH_PATH< soll detached werden!"
+   if [ ! -d $OH_PATH ]
+   then
+      logger_error "directory >$OH_PATH< does not exist!"
+      return 2
+   fi
+   if [ -z $ORACLE_HOME ]
+   then
+      logger_error "Die Umgebungsvariable >ORACLE_HOME< ist nicht gesetzt!"
+      return 2
+   fi
+   OH_NAME=`basename $OH_PATH`
+   CMD="$ORACLE_HOME/oui/bin/runInstaller -ignoreSysPrereqs -detachHome ORACLE_HOME=\"$OH_PATH\" ORACLE_HOME_NAME=\"$OH_NAME\""
+   logger_info "$CMD"
+   bash -c "$CMD"
+   if [ $? -ne 0 ]
+   then
+      logger_error "ORACLE_HOME >$OH_PATH< konnte nicht detached werden!"
+      return 1
+   fi
+}
+
+# =================================================================================================
+#
+# FUNCTION  configure huge pages
+#
+# =================================================================================================
+function config_huge_pages()
+{
+  local NOSYSCTL=$1
+  local ORASETHP=${2:-/usr/local/sbin/ORAsethugepages}
+  local RC=0
+  MESSAGE='starte function config_huge_pages'
+  logger_info "$MESSAGE"
+  if [ "$NOSYSCTL" -ne 0 -a "$NOSYSCTL" -ne 1 ]
+  then
+    MESSAGE="CONFIG_HUGE_PAGES: this function needs first parameter parameter: [0|1]"
+    Bmsg -rm "$MESSAGE" 2>&1
+    logger_error "$MESSAGE"
+    exit 1
+  else
+    check_digit $1 NOSYSCTL
+  fi
+
+  CTL_PARAMS="net.core.wmem_max net.core.wmem_default vm.nr_hugepages vm.dirty_expire_centisecs vm.swappiness kernel.shmmni vm.dirty_writeback_centisecs kernel.sem net.core.rmem_default vm.dirty_background_ratio net.core.rmem_max vm.dirty_ratio fs.aio-max-nr vm.hugetlb_shm_group"
+  TMPSYSCTL=/tmp/tmp_sysctl.conf
+  cp /etc/sysctl.conf $TMPSYSCTL
+  COPY=0
+  for PARM in $CTL_PARAMS
+  do
+    grep $PARM $TMPSYSCTL  >/dev/null
+    if [ $? -ne 0 ]
+    then
+      if [ "$PARM" == "net.core.wmem_max" ]
+      then
+        echo "net.core.wmem_max = 1048576" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "net.core.wmem_default" ]
+      then
+        echo "net.core.wmem_default = 262144" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "vm.nr_hugepages" ]
+      then
+        echo "vm.nr_hugepages = 0" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "vm.dirty_expire_centisecs" ]
+      then
+        echo "vm.dirty_expire_centisecs = 500" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "vm.swappiness" ]
+      then
+        echo "vm.swappiness = 0" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "kernel.shmmni" ]
+      then
+        echo "kernel.shmmni = 4096" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "vm.dirty_writeback_centisecs" ]
+      then
+        echo "vm.dirty_writeback_centisecs = 100" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "kernel.sem" ]
+      then
+        echo "kernel.sem = 250 32000 100 128" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "net.core.rmem_default" ]
+      then
+        echo "net.core.rmem_default = 262144" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "vm.dirty_background_ratio" ]
+      then
+        echo "vm.dirty_background_ratio = 3" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "net.core.rmem_max" ]
+      then
+        echo "net.core.rmem_max = 4194304" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "vm.dirty_ratio" ]
+      then
+        echo "vm.dirty_ratio = 15" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "fs.aio-max-nr" ]
+      then
+        echo "fs.aio-max-nr = 1048576" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      elif [ "$PARM" == "vm.hugetlb_shm_group" ]
+      then
+        echo "vm.hugetlb_shm_group = 3301" >>$TMPSYSCTL
+        MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+        logger_info "$MESSAGE"
+        COPY=1
+      else
+        echo "was tun bei Parameter $PARM!"
+      fi
+    fi
+  done
+  if [ $COPY -eq 1 ]
+  then
+    sudo /bin/vi /etc/sysctl.conf <<EOIN >/dev/null 2>&1
+:!mv /tmp/tmp_sysctl.conf /etc/sysctl.conf
+:q
+EOIN
+    sudo /sbin/sysctl -p >/dev/null 2>&1
+    RC=$?
+    if [ "$RC" -ne 0 ]; then
+      logger_error "/sbin/sysctl failed with RC:$RC"
+      return 1
+    fi
+  fi
+  TOTAL=`grep Huge /proc/meminfo|grep HugePages_Total|awk '{print $2}'`
+  FREE=`grep Huge /proc/meminfo|grep HugePages_Free|awk '{print $2}'`
+  MAXRUN=5
+  RUN=0
+  while [ $FREE -eq $TOTAL -o $FREE -lt 5 ]
+  do
+    # echo "TOTAL: $TOTAL#"
+    # echo "FREE: $FREE#"
+    TOTAL_OLD=$TOTAL
+    sudo $ORASETHP
+    RC=$?
+    if [ "$RC" -ne 0 ]; then
+      logger_error "$ORASETHP failed with RC:$RC"
+      return 2
+    fi
+    if [ $NOSYSCTL -eq 1 ]
+    then
+      logger_info "Database Reboot required to set correct number of Hugepages"
+      >/tmp/ORAmigrate_Reboot_needed
+      return 0
+    fi
+    MESSAGE="bouncing database!"
+    logger_info "$MESSAGE"
+
+    ORAbounce_db -sid $DBNAME >/dev/null 2>&1
+    RC=$?
+    if [ "$RC" -ne 0 ]; then
+      logger_error "ORAbounce_db failed with RC:$RC"
+      return 2
+    fi
+    TOTAL=`grep Huge /proc/meminfo|grep HugePages_Total|awk '{print $2}'`
+    FREE=`grep Huge /proc/meminfo|grep HugePages_Free|awk '{print $2}'`
+    RUN=`expr $RUN + 1`
+    MESSAGE="Durchgang $RUN beendet!"
+    logger_info "$MESSAGE"
+    echo
+    if [ $TOTAL -eq $TOTAL_OLD ]
+    then
+      MESSAGE="no more hugepages required!"
+      logger_info "$MESSAGE"
+      break
+    elif [ $RUN -eq $MAXRUN ]
+    then
+      MESSAGE="$RUN Durchgaenge muessen reichen!"
+      logger_info "$MESSAGE"
+      break
+    fi
+  done
+}
+
+# =================================================================================================
+#
+# Check ORACLE_HOME attached
+#
+# =================================================================================================
+
+CheckOHattached() {
+   if [ $# -ne 1 ]
+   then
+      logger_debug "--------> Function CheckOHattached"
+      logger_error "function needs a path!"
+      return 2
+   fi
+   logger_debug "--------> Function CheckOHattached"
+   CHECK_OH_PATH=$1
+   if [ ! -d $CHECK_OH_PATH ]
+   then
+      logger_error "directory >$CHECK_OH_PATH< does not exist!"
+      return 2
+   fi
+   INST_LOC=/etc/oraInst.loc
+   INVENTORY=`awk -F= '/inventory_loc/{printf"%s/ContentsXML/inventory.xml", $2}' $INST_LOC`
+   grep -v REMOVED $INVENTORY | grep $CHECK_OH_PATH >/dev/null 2>&1
+   return $?
+}
+
+# =================================================================================================
+#     FUNCTION: start instance
+# =================================================================================================
+function startInstance() {
+if [ $# -ne 1 ]
+then
+   logger_debug "--------> Function startInstance"
+   logger_error "function needs a start_command!"
+   return 2
+fi
+STARTCMD=$1
+logger_debug "--------> Function startInstance"
+logger_debug "--------> STARTCMD: $STARTCMD"
+
+MESSAGE="starting instance >$ORACLE_SID< with: $STARTCMD"
+logger_info "$MESSAGE"
+SQLRESULT=/tmp/result_sql1.lst
+${ORACLE_HOME}/bin/sqlplus <<EOSQL >/dev/null
+connect / as sysdba
+spool $SQLRESULT;
+$STARTCMD;
+exit;
+EOSQL
+
+checkORAerr
+if [ $RC -eq 1 ]
+then
+   echo
+   MESSAGE="$MESSAGE failed!"
+   logger_fatal "$MESSAGE"
+   MESSAGE=`cat $SQLRESULT`
+   logger_fatal "$MESSAGE"
+   exit 1
+fi
+rm $SQLRESULT
+}
+
+# =================================================================================================
+#     FUNCTION: stop instance
+# =================================================================================================
+function stopInstance()
+{
+if [ $# -ne 1 ]
+then
+   logger_debug "--------> Function stopInstance"
+   logger_error "function needs a stop_command!"
+   return 2
+fi
+STOPCMD=$1
+logger_debug "--------> Function stopInstance"
+logger_debug "--------> STOPCMD: $STOPCMD"
+
+logger_info "stopping instance >$ORACLE_SID< with: $STOPCMD"
+export ORACLE_HOME=${ORACLE_HOME}
+export ORACLE_SID=${ORACLE_SID}
+SQLRESULT=/tmp/result_sql3.lst
+${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL
+connect / as sysdba
+set serverout on size unlimited feedback off
+spool $SQLRESULT
+$STOPCMD
+exit;
+EOSQL
+
+checkORAerr
+if [ "$RC" -ne 0 ]; then
+   MESSAGE="instance couldn't be stopped"
+   logger_fatal "$MESSAGE"
+   exit 1
+fi
+return 0
+}
+
+# =================================================================================================
+#     FUNCTION: determine archiver status
+# =================================================================================================
+function det_arc_stat() {
+logger_debug "--------> Function det_arc_stat"
+
+MESSAGE="determining archiver status of instance >$ORACLE_SID<"
+logger_info "$MESSAGE"
+SQLRESULT=/tmp/result_sql1.lst
+${ORACLE_HOME}/bin/sqlplus <<EOSQL >/dev/null
+connect / as sysdba
+set hea off;
+spool $SQLRESULT;
+select archiver from v\$instance;
+exit;
+EOSQL
+
+checkORAerr
+if [ $RC -eq 1 ]
+then
+   echo
+   MESSAGE="$MESSAGE failed!"
+   logger_fatal "$MESSAGE"
+   MESSAGE=`cat $SQLRESULT`
+   logger_fatal "$MESSAGE"
+   exit 2
+fi
+
+grep STARTED $SQLRESULT >/dev/null
+if [ $? -eq 0 ] #gefunden
+then
+   STATUS=0
+else
+   STATUS=1
+fi
+rm $SQLRESULT
+return $STATUS
+}
+
+# =================================================================================================
+# FUNCTION check oracle error
+# =================================================================================================
+checkORAerr ()
+{
+if [ $# -eq 1 ]
+then
+   ERREXCLLIST=$1 # error exclude list
+else
+   ERREXCLLIST=''
+fi
+logger_debug "--------> Function checkORAerr"
+logger_debug "--------> ERREXCLLIST: $ERREXCLLIST"
+
+if [ "x$ERREXCLLIST" == "x" ]
+then
+   OERR=`grep "ORA-" $SQLRESULT`
+else
+   for EXCL in $ERREXCLLIST
+   do
+      GREPEXCL="$GREPEXCL -e $EXCL"
+   done
+   OERR=`grep "ORA-" $SQLRESULT|grep -v "$GREPEXCL"`
+fi
+logger_debug OERR=$OERR
+
+if [ "$OERR" != "" ]
+then
+   RC=1
+else
+   RC=0
+fi
+return $RC
+}
+
+# =================================================================================================
+# FUNCTION check rman error
+# =================================================================================================
+checkRMANerr ()
+{
+if [ $# -eq 1 ]
+then
+   ERREXCLLIST=$1 # error exclude list
+else
+   ERREXCLLIST=''
+fi
+logger_debug "--------> Function checkRMANerr"
+logger_debug "--------> ERREXCLLIST: $ERREXCLLIST"
+
+if [ "x$ERREXCLLIST" == "x" ]
+then
+   OERR=`grep "RMAN-" $SQLRESULT`
+else
+   for EXCL in $ERREXCLLIST
+   do
+      GREPEXCL="$GREPEXCL -e $EXCL"
+   done
+   OERR=`grep "RMAN-" $SQLRESULT|grep -v "$GREPEXCL"`
+fi
+
+if [ "$OERR" != "" ]
+then
+   RC=1
+fi
+}
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: get database name, db_unique name, primary etc.
+#-----------------------------------------------------------------------------------------------------------------
+function getDBvalues()
+{
+  export ORACLE_HOME=${ORACLE_HOME}
+  export ORACLE_SID=${ORACLE_SID}
+  ${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL
+  connect / as sysdba
+  set serverout on size unlimited feedback off
+  whenever sqlerror exit sql.sqlcode
+  spool $TMPSQLOUT
+  declare
+    l_primary_mode   pls_integer  := 0;
+    l_db_name        varchar2(20) := '';
+    l_db_unique_name varchar2(20) := '';
+    l_dg_broker      pls_integer  := 0;
+  begin
+    select case DATABASE_ROLE when 'PRIMARY' then 1 else 0 end,
+           NAME,
+           DB_UNIQUE_NAME,
+           case DATAGUARD_BROKER when 'ENABLED' then 1 else 0 end
+      into l_primary_mode,l_db_name,l_db_unique_name,l_dg_broker
+      from v\$database;
+    dbms_output.put_line('export IS_PRIMARY='||l_primary_mode);
+    dbms_output.put_line('export DBNAME='||l_db_name);
+    dbms_output.put_line('export DBUNAME='||l_db_unique_name);
+    dbms_output.put_line('export DGUARD='||l_dg_broker);
+  end;
+/
+EOSQL
+  RC=$?
+  if [ "$RC" -eq 0 ]; then
+    source $TMPSQLOUT
+  fi
+  rm $TMPSQLOUT
+  return $RC
+}
+
+# =================================================================================================
+#
+# Set ORACLE_HOME and PATH
+# If a parameter is passed to the function it will be checked if that's a valid ORACLE_HOME
+# If no parameter is passed the function will read the current inventory for a valid ORACLE_HOME
+#    If the inventory contains more than one ORACLE_HOME the routine will fail
+#
+# =================================================================================================
+
+SetOracleHome() {
+   logger_debug "--------> Function SetOracleHome"
+   if [ -n $1 ]
+   then
+      Lorahome=$1
+   fi
+#
+# Check for Oracle Inventory Location (default /etc/oraInst.loc
+#
+   ORAINSTLOC=/etc/oraInst.loc
+   if [ ! -r $ORAINSTLOC ]
+   then
+      logger_error "Oracle Software not installed - No Inventory Location ${ORAINSTLOC}"
+      return 1
+   fi
+   INVLOC=`grep inventory_loc $ORAINSTLOC | awk -F= '{ print $2 }'`
+
+   logger_debug "inventory_loc=$INVLOC"
+#
+#  Read ORACLE_HOME from Inventory
+#
+   if [ -z $Lorahome ]
+   then
+      Lorahome=`grep "LOC=" $INVLOC/ContentsXML/inventory.xml | awk -F\" '{ print $4 }'`
+      logger_debug Lorahome=$Lorahome
+#
+#  Check if only one ORACLE_HOME exist, if not = Error
+#
+      if [ `echo $Lorahome | wc -w` -ne 1 ]
+      then
+         logger_error "Multiple Oracle Homes exist"
+         for oh in `echo $Lorahome`
+         do
+             logger_error $oh
+         done
+         return 2
+      fi
+   fi
+#
+#  Check if Variable Lorahome is a valid ORACLE_HOME location
+#  if so set Variable ORACLE_HOME and PATH
+#
+   if [ -d $Lorahome ]
+   then
+      if [ -r ${Lorahome}/bin/oracle ]
+      then
+         ORACLE_HOME=${Lorahome}
+         PATH=${ORACLE_HOME}/bin:$PATH
+      else
+         logger_error "$Lorahome is not a valid ORACLE_HOME"
+         return 3
+      fi
+   else
+      logger_error "$Lorahome is not a valid ORACLE_HOME"
+      return 4
+   fi
+
+   logger_info "ORACLE_HOME=$ORACLE_HOME"
+   return 0
+}
+
+# =================================================================================================
+# FUNCTION set_LDAPSERVER
+# =================================================================================================
+set_LDAPSERVER ()
+{
+LDAPSERVER=`grep '^DIRECTORY_SERVERS=' /app/oracle/admin/dbhome/network/admin/ldap.ora|awk -F\( '{print $2}'|awk -F: '{print $1}'|awk -F. '{print $1}'`
+if [ "$LDAPSERVER" == '' ]
+then
+   Bmsg -rm 'could not determine LDAPSERVER!'
+   Bmsg -rm 'exit ...'
+   echo
+   exit 1
+fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#  FUNCTION: get database name, db_unique name, primary etc.
+#---------------------------s--------------------------------------------------------------------------------------
+function GetLdapServer()
+{
+  # Read DIRECTORY_SERVERS from ldap.ora
+  # Set env variables LDAP_SERVER, LDAP_PORT, LDAPS_PORTs
+  if [ -z "$TNS_ADMIN" ]; then
+    logger_error "Required variable TNS_ADMIN missing!"
+    exit 1
+  fi
+  logger_debug "Read DIRECTORY_SERVERS value from $TNS_ADMIN/ldap.ora"
+  local DIRSRV=$(grep '^DIRECTORY_SERVERS=' $TNS_ADMIN/ldap.ora | tail -1)
+  DIRSRV=${DIRSRV#*(}   # cut from start to (
+  DIRSRV=${DIRSRV%)*}   # cut from ) to end
+  IFS=':' read -a LDAPDIR <<< "$DIRSRV"
+  LDAP_SERVER="${LDAPDIR[0]}"
+  LDAP_PORT="${LDAPDIR[1]}"
+  LDAPS_PORT="${LDAPDIR[2]}"
+  logger_debug "Set env variables LDAP_SERVER=$LDAP_SERVER, LDAP_PORT=$LDAP_PORT, LDAPS_PORT=$LDAPS_PORT"
+}
+
+# =================================================================================================
+#
+# CleanUp
+#
+# =================================================================================================
+
+CleanUp() {
+   logger_debug "--> CleanUp"
+# ORATAB
+   logger_debug "egrep -v "^$TARGETDB:" $ORATAB > /tmp/oratab"
+   egrep -v "^$TARGETDB:" $ORATAB > /tmp/oratab
+   cat /tmp/oratab > $ORATAB
+# Files in $ORACLE_HOME/dbs
+   rm -f $ORACLE_HOME/dbs/hc_${TARGETDB}.dat
+   rm -f $ORACLE_HOME/dbs/init${TARGETDB}.ora
+   rm -f $ORACLE_HOME/dbs/init${TARGETDB}.save
+   rm -f $ORACLE_HOME/dbs/lk${TARGETDB}
+   rm -f $ORACLE_HOME/dbs/orapw${TARGETDB}
+   rm -f $ORACLE_HOME/dbs/snapcf_${TARGETDB}.f
+   rm -f $ORACLE_HOME/dbs/spfile${TARGETDB}.ora
+}

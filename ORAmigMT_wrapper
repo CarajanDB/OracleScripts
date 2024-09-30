@@ -1,0 +1,1321 @@
+#!/bin/bash
+# @(#) ============================================================================================
+# @(#) Filename    : ORAmigMT_wrapper
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.22
+# @(#) Date        : 2024-09-18
+# @(#) Description : Wrapperskript fuer die Multitenant Migration von Oracle Datenbanken
+# @(#)
+# @@(#)  Change History:
+# @@(#)  Version  Date        Author        Description
+# @@(#)  ------------------------------------------------------------------------------------------
+# @@(#)  1.0      2024-07-17  jahr     Uebernahme von ORAmig_wrapper
+# @@(#)  1.1      2024-07-26  jahr     InstallSW Function added
+# @@(#)  1.2      2024-07-29  jahr     Error Correction
+# @@(#)  1.3      2024-08-01  jahr     New Function CreateDatabase and query for CMDB data
+# @@(#)  1.4      2024-08-06  jahr     New Functions for AutoUpgrade
+# @@(#)  1.5      2024-08-07  jahr     use orignal fra and data size
+# @@(#)  1.6      2024-08-08  jahr     Prepare old database
+# @@(#)  1.7      2024-08-12  jahr     Error Correction in AutoUpgrade
+# @@(#)  1.8      2024-08-12  jahr     Final Maintenance Target Database
+# @@(#)  1.9      2024-08-16  jahr     Added some space for CDB to fra and data
+# @@(#)  1.10     2024-08-20  jahr     Changed Service Level
+# @@(#)  1.11     2024-08-27  mpils    Replaced ORAupgTargetFix by ORAupgSourcePost for source host
+# @@(#)  1.12     2024-09-03  jahr     Use target_migration_date
+# @@(#)  1.13     2024-09-04  mpils    Added OudGroupsUpdate and MoveTnsAlias
+# @@(#)  1.14     2024-09-06  mpils    Added ORAupgTargetCheck to FinalMaintenance
+# @@(#)  1.15     2024-09-06  jahr     RunBackup added
+# @@(#)  1.16     2024-09-10  jahr     Lock Users, remove PrepareSource
+# @@(#)  1.17     2024-09-10  jahr     Kill sessions, unlock users
+# @@(#)  1.18     2024-09-11  jahr     Changed exit codes
+# @@(#)  1.19     2024-09-12  jahr     HOSTNAME statt HOSTNAME_NEU, NOPROTECTION
+# @@(#)  1.20     2024-09-13  smh      TNS Switch function ersetzt durch neue Logik
+# @@(#)  1.21     2024-09-17  mpils    Fixed and tested OudGroupsUpdate
+# @@(#)  1.22     2024-09-18  jahr     Set PROTECTIONGROUP from CMDB and check LOG_MODE
+# @(#) ============================================================================================
+set -o pipefail
+
+# Set Variable ORABINDIR if you want to test / develop
+export ORABINDIR="${ORABINDIR:-/app/oracle/bin}"
+export ORABASEDIR="${ORABASEDIR:-${ORACLE_BASE}}"
+
+# Read Oracle Library including Logger
+source $ORABINDIR/ORAlib
+source $ORABINDIR/ORACDBlib
+
+# Init log4sh with default logfile name
+
+STARTTIME=`date +"%Y-%m-%d %k:%M:%S.%N"`
+DATUM=`date +%Y%m%d`
+DEFAULTTS=`date +%Y-%m-%d_%H:%M:%S`
+SQLFILENAME=/tmp/sql_${DATUM}.sql
+TMPSQLOUT=/tmp/sql_${DATUM}.tmp
+WRAPPER_OPT=$1
+Logger
+Parameter
+
+SHORTHOST=`hostname -s`
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+ACTIVE_USER=`id -un`
+if [ "$ACTIVE_USER" != "oracle" ]; then
+  MESSAGE="Script may not run as user $ACTIVE_USER, it must be started and run as oracle"
+  logger_fatal "$MESSAGE"
+  RC=255
+  MESSAGE="Error Code: ${RC}"
+  logger_fatal "$MESSAGE"
+  exit $RC
+fi
+
+#     START of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: write help text to screen
+#-----------------------------------------------------------------------------------------------------------------
+function helptext2screen()
+{
+cat <<EOTXT
+This script requires just ONE parameter!
+You may choose between: InstallSW         # runs on target host only
+                        CreateCDB         # rund on target host only
+                        PrepareMigration  # deprecated, not used
+                        OudGroupsUpdate   # runs on an oud host only
+                        AutoUpgrade       # runs on source and target host
+                        RunBackup         # runs on target host only
+                        FinalMaintenance  # runs on target host only
+EOTXT
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+if [ $help -eq 1 ]
+then
+  helptext2screen
+  RC=0
+else
+  helptext2screen
+  RC=1
+fi
+echo ""
+exit $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#    FUNCTION GetCMDBData
+#-----------------------------------------------------------------------------------------------------------------
+
+function GetCMDBData()
+{
+  logger_debug "--> $FUNCNAME"
+  hostnamevar="hostname"
+  SQL_STATEMENT="
+  DEFINE HOSTNAME=$HOSTNAME
+    set serverout on size unlimited feedback off verify off echo off termout off
+DECLARE
+      l_migrec             ora_mig_19mt_plan%ROWTYPE;
+      l_hostname           VARCHAR2(64) := '&HOSTNAME';
+      l_maxdatum           DATE := to_date('40000101000000','YYYYMMDDHH24MISS');
+BEGIN
+  SELECT
+       hostname,
+       db_service_level,
+       db_name,
+       db_unique_name,
+       dbid,
+       db_created,
+       db_version,
+       force_logging,
+       nls_characterset,
+       nls_nchar_characterset,
+       os_version,
+       cpu_count,
+       memory_size,
+       fs_data_total_mb,
+       fs_data_used_mb,
+       fs_fra_total_mb,
+       fs_fra_used_mb,
+       stage,
+       patchgroup,
+       protectiongroup,
+       hostname_neu,
+       cdb_name_neu,
+       pdb_name_neu,
+       cpu_count_neu,
+       memory_size_neu,
+       os_version_neu,
+       fs_fra_mb_neu,
+       fs_data_mb_neu,
+       preparation_date,
+       installation_date,
+       cdb_creation_date,
+       conversion_startdate,
+       conversion_enddate,
+       decommission_date,
+       milestone,
+       upgrade_group,
+       migration_group,
+       obsolete,
+       bemerkung,
+       target_start_date,
+       target_migration_date,
+       log_mode
+  INTO
+        l_migrec.hostname,
+        l_migrec.db_service_level,
+        l_migrec.db_name,
+        l_migrec.db_unique_name,
+        l_migrec.dbid,
+        l_migrec.db_created,
+        l_migrec.db_version,
+        l_migrec.force_logging,
+        l_migrec.nls_characterset,
+        l_migrec.nls_nchar_characterset,
+        l_migrec.os_version,
+        l_migrec.cpu_count,
+        l_migrec.memory_size,
+        l_migrec.fs_data_total_mb,
+        l_migrec.fs_data_used_mb,
+        l_migrec.fs_fra_total_mb,
+        l_migrec.fs_fra_used_mb,
+        l_migrec.stage,
+        l_migrec.patchgroup,
+        l_migrec.protectiongroup,
+        l_migrec.hostname_neu,
+        l_migrec.cdb_name_neu,
+        l_migrec.pdb_name_neu,
+        l_migrec.cpu_count_neu,
+        l_migrec.memory_size_neu,
+        l_migrec.os_version_neu,
+        l_migrec.fs_fra_mb_neu,
+        l_migrec.fs_data_mb_neu,
+        l_migrec.preparation_date,
+        l_migrec.installation_date,
+        l_migrec.cdb_creation_date,
+        l_migrec.conversion_startdate,
+        l_migrec.conversion_enddate,
+        l_migrec.decommission_date,
+        l_migrec.milestone,
+        l_migrec.upgrade_group,
+        l_migrec.migration_group,
+        l_migrec.obsolete,
+        l_migrec.bemerkung,
+        l_migrec.target_start_date,
+        l_migrec.target_migration_date,
+        l_migrec.log_mode
+   FROM ora_mig_19mt_plan
+  WHERE hostname_neu = l_hostname or hostname = l_hostname;
+        dbms_output.put_line('CMDB_HOSTNAME='||l_migrec.hostname);
+        dbms_output.put_line('CMDB_DB_SERVICE_LEVEL='''||l_migrec.db_service_level||'''');
+        dbms_output.put_line('CMDB_DB_NAME='||l_migrec.db_name);
+        dbms_output.put_line('CMDB_DB_UNIQUE_NAME='||l_migrec.db_unique_name);
+        dbms_output.put_line('CMDB_DBID='||l_migrec.dbid);
+        dbms_output.put_line('CMDB_DB_CREATED='||l_migrec.db_created);
+        dbms_output.put_line('CMDB_DB_VERSION='||l_migrec.db_version);
+        dbms_output.put_line('CMDB_FORCE_LOGGING='||l_migrec.force_logging);
+        dbms_output.put_line('CMDB_NLS_CHARACTERSET='||l_migrec.nls_characterset);
+        dbms_output.put_line('CMDB_NLS_NCHAR_CHARACTERSET='||l_migrec.nls_nchar_characterset);
+--        dbms_output.put_line('CMDB_OS_VERSION='||l_migrec.os_version);
+        dbms_output.put_line('CMDB_CPU_COUNT='||l_migrec.cpu_count);
+        dbms_output.put_line('CMDB_MEMORY_SIZE='||l_migrec.memory_size);
+        dbms_output.put_line('CMDB_FS_DATA_TOTAL_MB='||l_migrec.fs_data_total_mb);
+        dbms_output.put_line('CMDB_FS_DATA_USED_MB='||l_migrec.fs_data_used_mb);
+        dbms_output.put_line('CMDB_FS_FRA_TOTAL_MB='||l_migrec.fs_fra_total_mb);
+        dbms_output.put_line('CMDB_FS_FRA_USED_MB='||l_migrec.fs_fra_used_mb);
+        dbms_output.put_line('CMDB_STAGE='||l_migrec.stage);
+        dbms_output.put_line('CMDB_PATCHGROUP='||l_migrec.patchgroup);
+        dbms_output.put_line('CMDB_PROTECTIONGROUP='||l_migrec.protectiongroup);
+        dbms_output.put_line('CMDB_HOSTNAME_NEU='||l_migrec.hostname_neu);
+        dbms_output.put_line('CMDB_CDB_NAME_NEU='||l_migrec.cdb_name_neu);
+        dbms_output.put_line('CMDB_PDB_NAME_NEU='||l_migrec.pdb_name_neu);
+        dbms_output.put_line('CMDB_CPU_COUNT_NEU='||l_migrec.cpu_count_neu);
+        dbms_output.put_line('CMDB_MEMORY_SIZE_NEU='||l_migrec.memory_size_neu);
+--        dbms_output.put_line('CMDB_OS_VERSION_NEU='||l_migrec.os_version_neu);
+        dbms_output.put_line('CMDB_FS_FRA_MB_NEU='||l_migrec.fs_fra_mb_neu);
+        dbms_output.put_line('CMDB_FS_DATA_MB_NEU='||l_migrec.fs_data_mb_neu);
+        dbms_output.put_line('CMDB_PREPARATION_DATE='||l_migrec.preparation_date);
+        dbms_output.put_line('CMDB_INSTALLATION_DATE='||l_migrec.installation_date);
+        dbms_output.put_line('CMDB_CDB_CREATION_DATE='||l_migrec.cdb_creation_date);
+        dbms_output.put_line('CMDB_CONVERSION_STARTDATE='||l_migrec.conversion_startdate);
+        dbms_output.put_line('CMDB_CONVERSION_ENDDATE='||l_migrec.conversion_enddate);
+        dbms_output.put_line('CMDB_DECOMMISSION_DATE='||l_migrec.decommission_date);
+        dbms_output.put_line('CMDB_MILESTONE='||l_migrec.milestone);
+        dbms_output.put_line('CMDB_UPGRADE_GROUP='||l_migrec.upgrade_group);
+        dbms_output.put_line('CMDB_MIGRATION_GROUP='||l_migrec.migration_group);
+        dbms_output.put_line('CMDB_OBSOLETE='||l_migrec.obsolete);
+        dbms_output.put_line('CMDB_BEMERKUNG='||l_migrec.bemerkung);
+        dbms_output.put_line('CMDB_TARGET_START_DATE='||l_migrec.target_start_date);
+        dbms_output.put_line('CMDB_TARGET_MIGRATION_DATE='||to_char(l_migrec.target_migration_date,'DD/MM/YYYY_HH24:MI:SS'));
+        dbms_output.put_line('CMDB_LOG_MODE='||l_migrec.log_mode);
+  EXCEPTION
+  WHEN NO_DATA_FOUND
+  THEN
+     dbms_output.put_line('No data Found');
+ END;
+ /
+"
+# logger_debug $SQL_STATEMENT
+
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+#
+# Set Variables with CMDB values
+#
+  if [ "$RC" -eq 255 ]
+  then
+    logger_error "Server $HOSTNAME not listed as CMDB"
+    exit 255
+  fi
+  source $TMPSQLOUT ||logger_debug # 2>/dev/null
+  logger_debug "CMDB_HOSTNAME=$CMDB_HOSTNAME"
+  if [ -z "$CMDB_HOSTNAME" ]
+  then
+    logger_fatal "Error while reading CMDB Data"
+    exit 2
+  fi
+  logger_debug "<-- $FUNCNAME"
+  return 0
+}
+
+# =================================================================================================
+#
+# CMDBInstallSoftware
+#
+# =================================================================================================
+
+function CMDBInstallSoftware()
+{
+  logger_debug "--> $FUNCNAME"
+  SQL_STATEMENT="
+  DEFINE HOSTNAME=$HOSTNAME
+    UPDATE ora_mig_19mt_plan
+       SET
+           installation_date=sysdate
+     WHERE
+           hostname_neu='&HOSTNAME.';
+  COMMIT;
+"
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+
+# =================================================================================================
+#
+# CMDBCreateCDB
+#
+# =================================================================================================
+
+function CMDBCreateCDB()
+{
+  logger_debug "--> $FUNCNAME"
+  CDB_NAME_NEU=$1
+  PROTECTIONGROUP=$2
+  logger_debug "CDB_NAME_NEU=$CDB_NAME_NEU"
+  if [ -z "$PROTECTIONGROUP" -o "$PROTECTIONGROUP" == "NONE" ]
+  then
+    PROTECTIONGROUP=NOPROTECTION
+  fi
+  logger_debug "PROTECTIONGROUP=$PROTECTIONGROUP"
+  SQL_STATEMENT="
+set echo on
+  DEFINE HOSTNAME=$HOSTNAME
+    UPDATE ora_mig_19mt_plan
+       SET cdb_name_neu = '$CDB_NAME_NEU',
+           protectiongroup='$PROTECTIONGROUP',
+           cdb_creation_date=sysdate
+     WHERE
+           hostname_neu='&HOSTNAME.';
+  COMMIT;
+"
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+
+# =================================================================================================
+#
+# CMDBAutoUpgradeStart
+#
+# =================================================================================================
+
+function CMDBAutoUpgradeStart()
+{
+  logger_debug "--> $FUNCNAME"
+  logger_debug "HOSTNAME=$HOSTNAME"
+  SQL_STATEMENT="
+  DEFINE HOSTNAME=$HOSTNAME
+    UPDATE ora_mig_19mt_plan
+       SET conversion_startdate=sysdate
+     WHERE
+           hostname_neu='&HOSTNAME.';
+  COMMIT;
+"
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+# CMDBAutoUpgradeEnd
+#
+# =================================================================================================
+
+function CMDBAutoUpgradeEnd()
+{
+  logger_debug "--> $FUNCNAME"
+  SQL_STATEMENT="
+  DEFINE HOSTNAME=$HOSTNAME
+  DEFINE PDBNAME=$CMDB_PDB_NAME_NEU
+    UPDATE ora_mig_19mt_plan
+       SET conversion_enddate=sysdate,
+       pdb_name_neu='&PDBNAME.'
+     WHERE
+           hostname_neu='&HOSTNAME.';
+  COMMIT;
+"
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+
+# =================================================================================================
+#
+# CMDBPrepareMigration
+#
+# =================================================================================================
+
+function CMDBPrepareMigration()
+{
+  logger_debug "--> $FUNCNAME"
+  SQL_STATEMENT="
+  DEFINE HOSTNAME=$HOSTNAME
+    UPDATE ora_mig_19mt_plan
+       SET preparation_date=sysdate
+     WHERE
+           hostname='&HOSTNAME.';
+  COMMIT;
+"
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+# ExecCMDBSQL
+#
+# =================================================================================================
+
+function ExecCMDBSQL()
+{
+  logger_debug "--> $FUNCNAME"
+  # ReadOnlyTNSAdmin $ORACLE_HOME
+  if [ -n "$OUD_INST_ID" ]; then
+    # OracleHome function doesn't work with instant client used on on oud hosts
+    source /app/oracle/instantclient_19_21/.orainstclnt_bashrc
+    SQLPLUS="${ORACLE_HOME}/sqlplus"
+  else
+    OracleHome
+    SQLPLUS="${ORACLE_HOME}/bin/sqlplus"
+  fi
+  source $PWDDIR/.pwdfile_db_bvcmdb || RC=$DC
+  # logger_debug "PWDBVCMDB=${PWDBVCMDB}"
+  logger_debug "SQL_STATEMENT=$SQL_STATEMENT"
+  local TMPSQLOUTLOG=/tmp/`basename -s .sql $TMPSQLOUT`.log
+  logger_debug "ORACLE_HOME=$ORACLE_HOME"
+  logger_debug "TMPSQLOUT=$TMPSQLOUT"
+  logger_debug "TMPSQLOUTLOG=$TMPSQLOUTLOG"
+
+  $SQLPLUS -s /nolog <<EOSQL # >$TMPSQLOUTLOG
+  connect BV\$CMDB/${PWDBVCMDB}@dba-p
+  SET heading off feedback off pages 0 trimspool on
+  whenever sqlerror exit sql.sqlcode
+  whenever oserror exit 255
+  spool $TMPSQLOUT
+  $SQL_STATEMENT
+  spool off
+  exit;
+EOSQL
+  cat $TMPSQLOUT |logger_debug
+  if [ `grep -c invalid $TMPSQLOUTLOG` -gt 0 ]
+  then
+    logger_fatal "Unable to connect to CMDB Database"
+    logger_error "Please check $TMPSQLOUTLOG"
+    exit 1
+  fi
+  if [ `grep -c "No data Found" $TMPSQLOUTLOG` -gt 0 ]
+  then
+    logger_error "Server is not listed in CMDB as new Installation"
+    logger_error "Please check $TMPSQLOUTLOG and CMDB"
+    exit 1
+  fi
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+#  AutoUpgradeSource
+#
+# =================================================================================================
+
+function AutoUpgradeSource()
+{
+  logger_debug "--> $FUNCNAME"
+  #
+  # Prepare Migration
+  #
+  # source $TMPSQLOUT 2>/dev/null
+  if [ "$CMDB_LOG_MODE" == "NOARCHIVELOG" ]
+  then
+    logger_error "Unable to Upgrade Database"
+    logger_error "Database is in $CMDB_LOG_MODE Mode"
+    exit 1
+  fi
+  UPGRADEDIR=${ORABINDIR}/autoupgrade
+  CMD=${UPGRADEDIR}/ORAupgSourcePre
+  logger_debug "$CMD"
+  eval "$CMD" 2>&1 | logger_debug
+  RC=$?
+  if [ "$RC" -ne 0 ]
+  then
+    logger_error "Error in Database Prepartion"
+  else
+    logger_info "Preparation of $ORACLE_SID successfull"
+    CMDBPrepareMigration
+  fi
+  #
+  # Downtime of source starts 30 minutes * 1800 seconds before Migration begins
+  #
+  # convert CMDB_TARGET_MIGRATION_DATE into linux date format (YYYY-MM-DD H:M:S)
+  logger_debug "CMDB_TARGET_MIGRATION_DATE=$CMDB_TARGET_MIGRATION_DATE"
+  MIGRATIONTIME=$(date -d "$(echo $START |awk -F/ '{ print $1"-"$2"-"$3 }' | awk -F_ '{ print $1" "$2 }')" +"%Y-%m-%d %H:%M:%S")
+  logger_debug "MIGRATIONTIME=$MIGRATIONTIME"
+  NOWSEC=$(date +%s)
+  MIGRATIONTIMESEC=$(date -d "$MIGRATIONTIME" +%s)
+  #
+  # Sleep x seconds (MIGRATION TIME - 1800 - NOW)
+  #
+  SLEEPTIME=$((MIGRATIONTIMESEC - 1800 - $NOWSEC ))
+  logger_debug "SLEEPTIME = $SLEEPTIME"
+  if [ "$SLEEPTIME" -gt 0 ]
+  then
+    # Sleep until 30 minutes (1800 sec) before Migration Timestamp
+    sleep $SLEEPTIME
+  fi
+  GetTnsServicename "$CMDB_DB_NAME"
+  [ "$RC" -ne 0 ] && exit 1
+
+  source $PWDDIR/.pwdfile_db_system
+
+  logger_info "Downtime starts now `date`"
+  #
+  # Lock all Users except the Autoupgrade User
+  #
+  LockUsersExcept $SERVICENAME SYSTEM $PWDSYSTEM
+  RC=$?
+  [ "$RC" -ne 0 ] && exit 1
+
+  #
+  # Terminate all Sessions except those from the Autoupgrade User
+  #
+  KillSessionsExcept $SERVICENAME SYSTEM $PWDSYSTEM
+  RC=$?
+  [ "$RC" -ne 0 ] && exit 1
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+#  AutoUpgradeTarget
+#
+# =================================================================================================
+
+function AutoUpgradeTarget()
+{
+  logger_debug "--> $FUNCNAME"
+  #
+  # Ensure that Preparation has run on old database
+  #
+  logger_info "Wait for preparation of old database..."
+  maxloop=15
+  i=1
+  while [ -z "$CMDB_PREPARATION_DATE" ]
+  do
+    GetCMDBData
+    # cat $TMPSQLOUT
+    # source $TMPSQLOUT # 2>/dev/null
+    logger_debug "CMDB_PREPARATION_DATE=$CMDB_PREPARATION_DATE"
+    sleep 60
+    i=`expr $i + 1`
+    if [ $i -gt $maxloop ]
+    then
+      logger_error "Preparation Date not set"
+      exit 1
+    fi
+  done
+
+  logger_debug "CMDB_DB_NAME=$CMDB_DB_NAME"
+  logger_debug "CMDB_CDB_NAME_NEU=$CMDB_CDB_NAME_NEU"
+  logger_debug "CMDB_HOSTNAME_NEU=$CMDB_HOSTNAME_NEU"
+  if [ -z "$CMDB_PDB_NAME_NEU" -o "$CMDB_PDB_NAME_NEU" == "NONE" ]
+  then
+    CMDB_PDB_NAME_NEU=`echo $CMDB_DB_NAME|rev|cut -c2-|rev`
+    logger_debug "CMDB_PDB_NAME_NEU=$CMDB_PDB_NAME_NEU"
+  fi
+
+  CMDBAutoUpgradeStart
+  #
+  # Timestamp / Starttime
+  #
+  CMD="${ORABINDIR}/ORAnoncdb2pdb --sourcedb $CMDB_DB_NAME --targetcdb $CMDB_CDB_NAME_NEU --targetpdb $CMDB_PDB_NAME_NEU"
+  logger_debug "CMDB_TARGET_MIGRATION_DATE=$CMDB_TARGET_MIGRATION_DATE"
+  if [ -n "$CMDB_TARGET_MIGRATION_DATE" ]
+  then
+    logger_debug "CMDB_MIGRATION_DATE=$CMDB_TARGET_MIGRATION_DATE"
+    CMD="${CMD} --start_time \"$CMDB_TARGET_MIGRATION_DATE\""
+  fi
+  logger_debug "$CMD"
+
+  eval $CMD 2>&1 | tee >(logger_debug)
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -eq 0 ]
+  then
+    CMDBAutoUpgradeEnd
+  else
+    logger_fatal "Unable to migrate database to PDB"
+    exit $RC
+  fi
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+#  AutoUpgrade
+#
+# =================================================================================================
+
+function AutoUpgrade()
+{
+  logger_debug "--> $FUNCNAME"
+  OracleHome
+  GetCMDBData
+  RC=$?
+  if [ "$RC" -gt 0 ]
+  then
+     logger_fatal "Unable to get CMDB info"
+     exit $RC
+  fi
+  if [ "$HOSTNAME" == "$CMDB_HOSTNAME" ]
+  then
+    #
+    # Source Database
+    #
+    AutoUpgradeSource
+    exit 0
+  else
+    #
+    # Target Database
+    #
+    AutoUpgradeTarget
+  fi
+  #
+  logger_debug "<-- $FUNCNAME"
+}
+
+
+# =================================================================================================
+#
+#  CreateCDB
+#
+# =================================================================================================
+
+function CreateDatabase()
+{
+  logger_debug "--> $FUNCNAME"
+  OracleHome
+  GetCMDBData
+
+  if [ "$HOSTNAME" == "$CMDB_HOSTNAME" ]
+  then
+    logger_warn "This script should only run on the new database server"
+    exit 0
+  fi
+  if [ -z "$CMDB_PROTECTIONGROUP" ]
+  then
+    MESSAGE=`${ORABINDIR}/COHinventory --objectname $CMDB_DB_UNIQUE_NAME |tail -1`
+  # MESSAGE=`COHprotectedObjects --oradb $CMDB_DB_NAME`
+    RC=$?
+    logger_debug "RC=$RC"
+    logger_debug "MESSAGE=$MESSAGE"
+
+    COHCLUSTER=`echo $MESSAGE |cut -d, -f1`
+    logger_debug COHCLUSTER=$COHCLUSTER
+    PROTECTIONGROUP=`echo "$MESSAGE" |cut -d, -f2|cut -d" " -f2`
+    logger_debug "PROTECTIONGROUP=$PROTECTIONGROUP"
+    if [ -z "$PROTECTIONGROUP" -o "$PROTECTIONGROUP" == "NONE" ]
+    then
+      logger_warn "Unable to specify the protection group"
+      logger_warn "$MESSAGE"
+      PROTECTIONGROUP=NOPROTECTION
+    fi
+  else
+    PROTECTIONGROUP=$CMDB_PROTECTIONGROUP
+  fi
+  
+  logger_debug "PROTECTIONGROUP=$PROTECTIONGROUP"
+  #
+  if [ -z "$CMDB_CDB_NAME_NEU" -o "$CMDB_CDB_NAME_NEU" == "NONE" ]
+  then
+    CMDB_CDB_NAME_NEU=C${CMDB_DB_NAME}
+    logger_debug "CMDB_CDB_NAME_NEU=$CMDB_CDB_NAME_NEU"
+  fi
+  logger_debug "CMDB_FS_DATA_TOTAL_MB=$CMDB_FS_DATA_TOTAL_MB"
+  logger_debug "CMDB_FS_FRA_TOTAL_MB=$CMDB_FS_FRA_TOTAL_MB"
+  local DATASIZEMB=`expr $CMDB_FS_DATA_TOTAL_MB + $MINDATASIZEMB`
+  local FRASIZEMB=`expr $CMDB_FS_FRA_TOTAL_MB + $MINFRASIZEMB`
+
+  CMD="${ORABINDIR}/ORAdeployCDB --database $CMDB_CDB_NAME_NEU --charset $CMDB_NLS_CHARACTERSET --ncharset $CMDB_NLS_NCHAR_CHARACTERSET --protectiongroup $PROTECTIONGROUP --datasize $DATASIZEMB --frasize $FRASIZEMB"
+  logger_debug "CMD=$CMD"
+  eval $CMD 2>&1 | tee >(logger_debug)
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -le 1 ]
+  then
+    logger_info "CMDBCreateCDB $CMDB_CDB_NAME_NEU $PROTECTIONGROUP"
+    CMDBCreateCDB $CMDB_CDB_NAME_NEU $PROTECTIONGROUP
+  fi
+  exit $RC
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+# getInstanceParameter
+#
+# =================================================================================================
+
+function getInstanceParameter()
+{
+  logger_debug "--> $FUNCNAME"
+  SQL_STATEMENT="
+    SET echo OFF feedback OFF, trimespool ON, lines 1000, pages 0 heading OFF
+    SELECT 'ALTER SYSTEM SET '||p.name||' = '||p.value||' SCOPE=spfile;'
+     FROM  bv$cmdb.ora_instance_parameter p,  bv$cmdb.ora_instance i
+     WHERE p.ora_instance_id = i.id
+       AND p.isdefault='FALSE'
+       AND i.ts = (SELECT max(ts) FROM bv$cmdb.ora_instance WHERE id=i.id)
+       AND p.ts = (SELECT max(ts) FROM bv$cmdb.ora_instance_parameter WHERE id=p.id)
+       AND (p.name IN ('sga_target','shared_pool_size','pga_aggragate_target','pga_aggregate_limit','db_cache_size','open_cursors','processes','db_recovery_file_dest_size','optimizer_index_cost_adj','optimizer_index_caching')
+            OR p.name like '%optim%')
+       AND i.instance_name = 'IESP';
+  "
+  connectCMDB
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+# InstallSW
+#   - Installs the Oracle Database Software
+# exit 255 if software has already been installed
+#
+# =================================================================================================
+
+InstallSW()
+{
+  logger_debug "--> $FUNCNAME"
+  #
+  # No database software should be installed
+  #
+  if [ -r /app/oraInventory/ContentsXML/inventory.xml ]
+  then
+    logger_warn "OraInventory not empty. This Software Installation can only be done on a new Oracle Server"
+    exit 0
+  fi
+  logger_debug "${ORABINDIR}/ORAdeployCDB --install"
+  ${ORABINDIR}/ORAdeployCDB --install
+  RC=$?
+  CMDBInstallSoftware
+  logger_debug "<-- $FUNCNAME"
+  exit $RC
+}
+
+
+# =================================================================================================
+#
+# RunBackup
+#
+# =================================================================================================
+
+RunBackup()
+{
+  logger_debug "--> $FUNCNAME"
+  OracleHome
+  GetCMDBData
+  if [ -z "$CMDB_HOSTNAME_NEU" ]
+  then
+    logger_warn "This script should only run on new host"
+    exit 0
+  fi
+  if [ -z "$CMDB_CDB_NAME_NEU" ]
+  then
+    logger_error "No Entry for New CDBNAME found"
+    exit 1
+  fi
+
+  CMD="${ORABINDIR}/COHinventory --objectname $CMDB_CDB_NAME_NEU"
+  logger_debug "CMD=$CMD"
+  local CDBUNAME=`$CMD|tail -1|cut -d, -f4`
+  RC=$?
+  logger_debug "RC=$RC"
+  logger_debug "CDBUNAME=$CDBUNAME"
+  if [ "$RC" -eq 0 ]
+  then
+    CMD="${ORABINDIR}/COHrunORAbackup --sourcedb $CDBUNAME"
+    logger_debug "$CMD"
+    MESSAGE=`$CMD`
+  fi
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+# PrepareMigration
+#   - Prepares the old database
+#
+# =================================================================================================
+
+PrepareMigration()
+{
+  logger_debug "--> $FUNCNAME"
+  UPGRADEDIR=${ORABINDIR}/autoupgrade
+  OracleHome
+  GetCMDBData
+  if [ "$RC" -eq 255 ]
+  then
+    logger_error "Server $HOSTNAME not listed as CMDB"
+    exit 255
+  fi
+  if [ $HOSTNAME != "$CMDB_HOSTNAME" ]
+  then
+    logger_error "This script should only run on the old database"
+    exit 0
+  fi
+
+  CMD=${UPGRADEDIR}/ORAupgSourcePre
+  logger_debug "$CMD"
+  eval "$CMD" 2>&1 | logger_debug
+  RC=$?
+  if [ "$RC" -ne 0 ]
+  then
+    logger_error "Error in Database Prepartion"
+  else
+    logger_info "Preparation of $ORACLE_SID successfull"
+    CMDBPrepareMigration
+  fi
+  exit $RC
+
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+# FinalMaintenance
+#   Parameter changes, reboot, etc
+#
+# =================================================================================================
+
+FinalMaintenance()
+{
+  logger_debug "--> $FUNCNAME"
+  UPGRADEDIR="${ORABINDIR}/autoupgrade"
+  OracleHome
+  GetCMDBData
+  RC=$?
+  logger_debug "HOSTNAME=_${HOSTNAME}_"
+  logger_debug "CMDB_HOSTNAME_NEU=${CMDB_HOSTNAME_NEU}"
+  if [ "$HOSTNAME" == "$CMDB_HOSTNAME" ]
+  then
+    logger_debug "old Server"
+    logger_info "Nothing to do yet"
+  #  CMD="${UPGRADEDIR}/ORAupgSourcePost"
+  #  logger_debug "$CMD"
+  #  eval "$CMD" 2>&1 | logger_debug
+  #  RC=$?
+  #  if [ "$RC" -ne 0 ]
+  #  then
+  #    logger_error "Error in Final Maintenance on Host $HOSTNAME"
+  #    exit 1
+  #  else
+  #    logger_info "Database $CMDB_DB_NAME is down"
+  #    exit 2
+  #  fi
+  else
+    logger_debug "new Server"
+    logger_debug "CMDB_PDB_NAME_NEU=$CMDB_PDB_NAME_NEU"
+    if [ -z "$CMDB_PDB_NAME_NEU" ]
+    then
+      logger_error "Unable to identify Pluggable Database on $HOSTNAME"
+      exit 2
+    fi
+    # Run target fixup script
+    CMD="${UPGRADEDIR}/ORAupgTargetFix -s $CMDB_DB_NAME -t $CMDB_PDB_NAME_NEU"
+    logger_debug "$CMD"
+    eval "$CMD" 2>&1 | logger_debug
+    RC=$?
+    if [ "$RC" -ne 0 ]
+    then
+      SKIP_TNS_MOVE=1
+      logger_error "Error in ORAupgTargetFix"
+      logger_error "Skip final tns-alias switch over"
+      exit $RC
+    else
+      SKIP_TNS_MOVE=0
+      logger_info "ORAupgTargetFix script completed"
+    fi
+
+    # Run final recompile and check sqls for cdb and pdb
+    CMD="${UPGRADEDIR}/ORAupgTargetCheck -n 'CDB\$ROOT' -r -c"
+    logger_debug "$CMD"
+    eval "$CMD" 2>&1 | logger_debug
+
+    CMD="${UPGRADEDIR}/ORAupgTargetCheck -n '$CMDB_PDB_NAME_NEU' -r -c"
+    logger_debug "$CMD"
+    eval "$CMD" 2>&1 | logger_debug
+    RC=$?
+
+    # Run final switch over (create new tns and rename current tns to old and new to current)
+    # # still not tested !!!
+    if [ "$SKIP_TNS_MOVE" -ne 1 ]; then
+      logger_info "Final tns-alias switch over"
+      #
+      # TNS Switch Logik aus alter Migration uebernommen:
+      # # MoveTnsAlias
+       TnsSwitch
+       RC=$?
+       if [ "$RC" -ne 0 ]; then
+         logger_error "Final tns-alias switch over failed!"
+       else
+         logger_info "Final tns-alias switch over completed!"
+       fi
+     fi
+    if [ "$RC" -ne 0 ]
+    then
+      logger_error "Error in Final Maintenance on Host $HOSTNAME"
+      exit 1
+    else
+      logger_info "Database Upgrade Successfully completed"
+    fi
+  fi
+
+  logger_debug "<-- $FUNCNAME"
+  return $RC
+}
+
+# =================================================================================================
+# MoveTnsAlias
+#   Create a new TNS-Alias for new PDB and change old one to new one and vis-a-vis
+# =================================================================================================
+
+function MoveTnsAlias() {
+  logger_debug "--> $FUNCNAME"
+  GetTnsServicename $CMDB_DB_NAME
+  local TNSCUR=$SERVICENAME
+#  local TNSCUR="${CMDB_DB_NAME^^}-${CMDB_STAGE^^}"
+  local TNSOLD="${TNSCUR}_RH7"
+  local TNSNEW="${CMDB_PDB_NAME_NEU^^}-${CMDB_STAGE^^}_RH8"
+
+  # Create new tns for pdb
+  CMD="$SCRIPTDIR/ORAtnsService -opt add -type tns
+  -sid '${CMDB_CDB_NAME_NEU}' -host '${CMDB_HOSTNAME_NEU}' -port '${PORT}'
+  -tnssrv '${TNSNEW}'
+  -dbsrv '${CMDB_PDB_NAME_NEU,,}.unix.lan'
+  -f"
+  logger_debug "$CMD"
+  eval $CMD | logger_debug
+  RC=$?
+  if [ "$RC" -ne 0 ]
+  then
+    logger_error "Creation of new tns-alias '$TNSNEW' failed!"
+    return $RC
+  else
+    logger_info "Created new tns-alias  '$TNSNEW'"
+  fi
+
+  # Move TNSCUR to TNSOLD
+  CMD="$SCRIPTDIR/ORAtnsService -opt rename -type tns -tnssrv '${TNSCUR^^}' -newsrv '${TNSOLD^^}' -f"
+  eval $CMD | logger_debug
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    logger_error "Rename tns-alias '$TNSCUR' to '$TNSOLD' failed!"
+    logger_debug "<-- $FUNCNAME"
+    return $RC
+  else
+    logger_info "Renamed tns-alias '$TNSCUR' to '$TNSOLD'"
+  fi
+
+  # Move TNSNEW to TNSCUR
+  CMD="$SCRIPTDIR/ORAtnsService -opt rename -type tns -tnssrv '${TNSNEW^^}' -newsrv '${TNSCUR^^}' -f"
+  eval $CMD | logger_debug
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    logger_error "Rename tns-alias '$TNSNEW' to '$TNSCUR' failed!"
+    logger_debug "<-- $FUNCNAME"
+    return $RC
+  else
+    logger_info "Renamed tns-alias '$TNSNEW' to '$TNSCUR'"
+  fi
+
+  logger_debug "<-- $FUNCNAME"
+  return $RC
+}
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Get TNS Services from old Host and generate and build them to new Host:
+#-----------------------------------------------------------------------------------------------------------------
+function TnsSwitch
+{
+  FUNCNAME=${FUNCNAME[0]}
+  MESSAGE="${SCRIPTNAME}-${FUNCNAME} - Generate TNS Services"
+  logger_info "${MESSAGE}"
+
+#      This Function is only relevant for Migration Process ( ${SHORTHOST} = 1. Part of Hostname )
+#  echo ${CMDB_HOSTNAME_NEU}
+#  echo ${HOSTNAME}
+  if [ "${CMDB_HOSTNAME_NEU}" != "${HOSTNAME}" ]; then
+    MESSAGE="${SCRIPTNAME}-${FUNCNAME}: No TNS Actions necessary - Actions will be skipped!"
+    logger_info "${MESSAGE}"
+    exit 0
+  fi
+
+  MIG19C_BASE="/misc/orashare1/workshr/ora_admin/mig19cmt"
+
+  TNS_SAVE="${MIG19C_BASE}/tns_services/01_save/${CMDB_DB_NAME}at${SHORTHOST}"
+  TNS_SWITCH="${MIG19C_BASE}/tns_services/02_switch/${CMDB_DB_NAME}at${SHORTHOST}"
+  TNS_FALLBACK="${MIG19C_BASE}/tns_services/03_fallback/${CMDB_DB_NAME}at${SHORTHOST}"
+
+  SQL_STATEMENT="
+
+set LINESIZE 500;
+spool $TNS_SAVE;
+
+SELECT 'RC=0' from dual
+union all
+SELECT '/app/oracle/bin/ORAtnsService -f -opt rename -tnssrv '||lower(T.CN)||' -newsrv '||lower(T.CN)||'-migsv ||let RC=\$RC+\$?'
+  FROM ORA_TNS_SERVICE T
+     , ORA_TNS_SERVICE_HOST TH
+     , ORA_MIG_19MT_PLAN UP
+ WHERE T.ID = TH.ORA_TNS_SERVICE_ID
+   AND TH.HOST = UP.HOSTNAME
+   AND REGEXP_SUBSTR(UP.HOSTNAME, '[^.]+', 1) = REGEXP_SUBSTR ('${CMDB_HOSTNAME}', '[^.]+', 1)
+   AND UPPER(T.CN) <> UPPER('${CMDB_DB_UNIQUE_NAME}')
+ union all
+ SELECT 'exit \${RC}' from dual
+   ;
+"
+logger_debug $SQL_STATEMENT
+
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+
+  SQL_STATEMENT="
+
+set LINESIZE 500;
+spool $TNS_SWITCH;
+
+SELECT 'RC=0' from dual
+union all
+SELECT '/app/oracle/bin/ORAtnsService -f -opt add -host '||UP.HOSTNAME_NEU||' -port 1601 -tnssrv '||lower(T.CN)||' -dbsrv '||lower(T.DBSERVICE)||' ||let RC=\$RC+\$?'
+  FROM ORA_TNS_SERVICE T
+     , ORA_TNS_SERVICE_HOST TH
+     , ORA_MIG_19MT_PLAN UP
+ WHERE T.ID = TH.ORA_TNS_SERVICE_ID
+   AND TH.HOST = UP.HOSTNAME
+   AND REGEXP_SUBSTR(UP.HOSTNAME, '[^.]+', 1) = REGEXP_SUBSTR ('${CMDB_HOSTNAME}', '[^.]+', 1)
+   AND UPPER(T.CN) <> UPPER('${CMDB_DB_UNIQUE_NAME}')
+union all
+SELECT 'exit \${RC}' from dual
+   ;
+"
+logger_debug $SQL_STATEMENT
+
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+
+  SQL_STATEMENT="
+
+set LINESIZE 500;
+spool $TNS_FALLBACK;
+
+SELECT 'RC=0' from dual
+union all
+SELECT '/app/oracle/bin/ORAtnsService -f -opt remove -tnssrv '||lower(T.CN)||' ||let RC=\$RC+\$?'
+  FROM ORA_TNS_SERVICE T
+     , ORA_TNS_SERVICE_HOST TH
+     , ORA_MIG_19MT_PLAN UP
+ WHERE T.ID = TH.ORA_TNS_SERVICE_ID
+   AND TH.HOST = UP.HOSTNAME
+   AND REGEXP_SUBSTR(UP.HOSTNAME, '[^.]+', 1) = REGEXP_SUBSTR ('${CMDB_HOSTNAME}', '[^.]+', 1)
+   AND UPPER(T.CN) <> UPPER('${CMDB_DB_UNIQUE_NAME}')
+union all
+SELECT '/app/oracle/bin/ORAtnsService -f -opt copy -tnssrv '||lower(T.CN)||'-migsv -newsrv '||lower(T.CN)||' ||let RC=\$RC+\$?'
+  FROM ORA_TNS_SERVICE T
+     , ORA_TNS_SERVICE_HOST TH
+     , ORA_MIG_19MT_PLAN UP
+ WHERE T.ID = TH.ORA_TNS_SERVICE_ID
+   AND TH.HOST = UP.HOSTNAME
+   AND REGEXP_SUBSTR(UP.HOSTNAME, '[^.]+', 1) = REGEXP_SUBSTR ('${CMDB_HOSTNAME}', '[^.]+', 1)
+   AND UPPER(T.CN) <> UPPER('${CMDB_DB_UNIQUE_NAME}')
+ union all
+ SELECT 'exit \${RC}' from dual
+   ;
+"
+logger_debug $SQL_STATEMENT
+
+  ExecCMDBSQL
+  RC=$?
+  logger_debug "RC=$RC"
+  if [ "$RC" -gt 0 ]
+  then
+    exit 1
+  fi
+
+  #
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    MESSAGE="${SCRIPTNAME}-${FUNCNAME} - Error during Generate of TNS-Services"
+    logger_info "${MESSAGE}"
+    cat ${TNS_SAVE}.lst
+    cat ${TNS_SWITCH}.lst
+    cat ${TNS_FALLBACK}.lst
+    rm $TMPSQLOUT 2>/dev/null
+    exit 1
+  fi
+
+  #
+  #  zunaechst fuer TEST nur auskommentiert !!!!!
+  #
+  # sh ${TNS_SAVE}.lst
+  # sh ${TNS_SWITCH}.lst
+
+}
+
+# =================================================================================================
+# OUDeusGroupsUpdate
+#   Add target PDB to same enterprise roles as source NonCDB
+#   Have to be run on an OUD host!
+# =================================================================================================
+
+OudGroupsUpdate() {
+  logger_debug "--> $FUNCNAME"
+  local ERRCNT=0
+  local RC=0
+
+  # Check host environment for OUD
+  if [ "${OUD_INST_ID:0:3}" != "OUD" ]; then
+    logger_fatal "Function $FUNCNAME have to be run on an oud host!"
+    logger_debug "<-- $FUNCNAME"
+    return 1
+  fi
+
+  # Get data from cmdb
+  SQL_STATEMENT="
+set serverout on size unlimited feedback off verify off echo off termout off trimspool on
+DECLARE
+  CURSOR c1 is
+    select *
+    from ora_mig_19mt_plan
+    where hostname_neu is not null
+    and cdb_name_neu is not null
+    and pdb_name_neu is not null
+    and eus_roles_upd_date is null
+    -- and cdb_name_neu = 'CDWH2I' -- for test only
+  ;
+BEGIN
+  dbms_output.put_line('# HOSTNAME|DB_UNIQUE_NAME|HOSTNAME_NEU|CDB_NAME_NEU|PDB_NAME_NEU');
+  FOR i in c1 LOOP
+    dbms_output.put_line(i.hostname||'|'||i.db_unique_name||'|'||i.hostname_neu||'|'||i.cdb_name_neu||'|'||i.pdb_name_neu);
+  END LOOP;
+  EXCEPTION
+    WHEN NO_DATA_FOUND
+    THEN
+      dbms_output.put_line('# No data matched sql where clause!');
+END;
+/
+"
+  logger_debug $SQL_STATEMENT
+  # Read from cmdb into TMPSQLOUT file
+  TMPSQLOUT=`mktemp -u -t UpdateEusGroups_XXXXXXXXXX.lst`
+  ExecCMDBSQL
+  RET=$?
+  logger_debug "RET=$RET"
+  if [ "$RET" -gt 0 ]; then
+    exit 1
+  fi
+  # logger_debug "TMPSQLOUT=$TMPSQLOUT"
+  cat "$TMPSQLOUT" | logger_debug
+
+  # Work on data from cmdb
+  RECORDS="$(cat $TMPSQLOUT|grep -v -e '#' -e '^ *$'|wc -l)"
+  logger_info "$RECORDS records found in cmdb"
+  IFS=$'\n'
+  for i in $(cat $TMPSQLOUT|grep -v -e '#' -e '^ *$')
+  do
+    # logger_debug "$i"
+    # Split cmdb output line
+    IFS='|' read SRC_HOST SRC_DBUNAME TGT_HOST TGT_CDB TGT_PDB REST <<<$(echo $i)
+    logger_debug "SRC_HOST=$SRC_HOST, SRC_DBUNAME=$SRC_DBUNAME, TGT_HOST=$TGT_HOST, TGT_CDB=$TGT_CDB, TGT_PDB=$TGT_PDB"
+    # Exec OUDeroleDBchange
+    SRC_DBREG="${SRC_DBUNAME^^}"
+    TGT_PDBREG="${TGT_PDB^^}_${TGT_CDB^^}_S1"
+    CMD="OUDeroleDBchange -s '$SRC_DBREG' -t '$TGT_PDBREG'"
+    logger_info "$CMD"
+    eval "$CMD" 2>&1 | logger_debug
+    RET=$?
+    if [ "$RET" -ne 0 ]; then
+      RC=1
+      ERRCNT=`expr $ERRCNT + 1`
+      logger_error "Command failed with RC=$RET, $CMD"
+      continue
+    fi
+
+    # Update cmdb
+    SQL_STATEMENT="
+set echo on
+UPDATE ora_mig_19mt_plan
+    SET eus_roles_upd_date=sysdate
+  WHERE hostname = '$SRC_HOST'
+    and db_unique_name = '$SRC_DBUNAME'
+    and hostname_neu = '$TGT_HOST'
+  and cdb_name_neu = '$TGT_CDB'
+  and pdb_name_neu = '$TGT_PDB'
+;
+COMMIT;
+"
+  ExecCMDBSQL
+  RET=$?
+  logger_debug "RET=$RET"
+  if [ "$RET" -gt 0 ]
+  then
+    RC=1
+    logger_error "ExecCMDBSQL failed with RC=$RET"
+    continue
+  fi
+  done
+  IFS=
+
+  logger_info "$ERRCNT errors running OUDeroleDBchange!"
+  logger_debug "<-- $FUNCNAME"
+  return $RC
+}
+
+# =================================================================================================
+TEST() {
+  logger_debug "--> $FUNCNAME"
+  logger_debug "GetCMDBData"
+  hostnamevar="hostname_neu"
+  GetCMDBData
+  # logger_debug "CMDBCreateCDB $CMDB_CDB_NAME_NEU"
+  # CMDBCreateCDB $CMDB_CDB_NAME_NEU
+  logger_debug "<-- $FUNCNAME"
+}
+
+# =================================================================================================
+#
+#     Main program
+#
+# =================================================================================================
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+
+help=0
+if [ $# -ne 1 ]
+then
+  usage
+else
+  HOSTNAME=`hostname -A|cut -d' ' -f1`
+  while [ $# -gt 0 ]; do
+    case "$WRAPPER_OPT" in
+      'InstallSW'             ) InstallSW
+                                exit $?;;
+      'CreateCDB'             ) CreateDatabase
+                                exit;;
+      'OudGroupsUpdate'       ) OudGroupsUpdate
+                                exit $?;;
+      'TEST'                  ) TEST
+                                exit;;
+      'PrepareMigration'      ) # PrepareMigration  # Moved to AutoUpgrade!
+                                exit;;
+      'AutoUpgrade'           ) AutoUpgrade
+                                exit;;
+      'RunBackup'             ) RunBackup
+                                exit;;
+      'FinalMaintenance'      ) FinalMaintenance
+                                exit;;
+      '-h'|'-H'|'-?'|'--help' ) help=1
+                                usage;;
+      *                       ) usage;;
+     esac
+   done
+fi
+exit 0

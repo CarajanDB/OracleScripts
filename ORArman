@@ -1,0 +1,1043 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#)  File        : ORArman
+# @(#)  Author      : Daniel Oberdick
+# @(#)  Modified    : Marcel Pils
+# @(#)
+# @(#)  Description : This script backup Oracle databases
+# @(#)                need an rmantab or SID parameter
+# @(#)
+# @(#)  Version     : 8.2.4
+# @(#)  Date        : 09.04.2024
+# @(#)
+# @(#)  Attention   : This script must be started as user ORACLE
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)  1.0  2012-06-21  Oberdick Created
+# @@(#)  2.0  2013-05-15  Pils   Changed a lot of
+# @@(#)  3.0  2013-09-04  Thiel  Pruefung, ob einer der Parameter a|f|i|c eingeben wurde
+# @@(#)                          Pruefung, dass NUR EINER der Parameter a|f|i|c eingeben wurde
+# @@(#)                          Parameter -r (Retention-Level) eingefuehrt
+# @@(#)                          Pruefung ob nur ein gueltiger Retention-Level 2w|6m|3y|3d
+# @@(#)                          uebergeben wurde
+# @@(#)                          Aufbau der RMAN-Befehlssyntax im Skript
+# @@(#)                          USAGE angepasst
+# @@(#)
+# @@(#)  4.0  2014-09-01  Thiel  RMAN-Repository der Datenbank RCVCAT nach UCORAP/RMANREPDG verlegt
+# @@(#)                          dazu notwendige Aenderungen am rman-Passwortfile und im Skript
+# @@(#)                          ORArman vorgenommen s. PWDRCU
+# @@(#)
+# @@(#)  5.0  2014-10-14  Thiel  Option -p zur Uebergabe der Backup-Policy eingefuehrt
+# @@(#)
+# @@(#)  6.0  2015-04-22  Thiel  Um Archivelog-Backups waehrend eines laufenden Full-Backups zu unterbinden
+# @@(#)                          wird eine Signaldatei $ORACLE_BASE/full_bkp_active (SIGNDAT) gepflegt. Ein Full-Backup
+# @@(#)                          vermerkt die SID der gerade gesicherten DB in dieser Datei. Ein gleichzeitig
+# @@(#)                          anlaufendes Archivelog-Backup wird dann nicht gestartet.
+# @@(#)
+# @@(#)       2015-07-30  Wi     RUN-Block um Backup Archivelogs auf Data Guard log. Standby entfernt.
+# @@(#)
+# @@(#)  6.1  12.08.2015  Thiel  In DG-Umgebungen ist in der RMAN-CHANNEL-Konfiguration ein spezieller NB_ORA_CLIENT gesetzt.
+# @@(#)                          Dieser muss ausgelesen werden, um ORArman mit diesem Client-Namen zu versorgen.
+# @@(#)
+# @@(#)  6.2  19.08.2015  Thiel  Das Backup der Archivelogs wurde umgestellt von Backup mit sofortigem Löschen
+# @@(#)                          auf Backup aller noch nicht gesicherten Archivelogs mit anschliessendem Löschen aller
+# @@(#)                          Archivelogs die aelter sind als ein Tag.
+# @@(#)                          Dadurch bleiben die Archivelogs fuer einen Tag in der FRA erhalten
+# @@(#)                          -> FRA braucht doppelt soviel Platz wie vorher (Archivelogvolumen für ZWEI Tage)
+# @@(#)
+# @@(#)  6.3  21.12.2015  Thiel  Bis dato wurde die mindestens stuendliche Sicherung der Archivelogs durch einen stuendlichen
+# @@(#)                          Lauf des Backupjobs aus CTRL-M heraus gewaehrleistet. Dies fuehrt aber zu Problemen, falls
+# @@(#)                          in der Stunde zwischen den Backups ungewoehnlich viele Archivelogs anfallen und somit die
+# @@(#)                          FRA vollgeschrieben wird. Deshalb Umstellung auf 6-Minutenzyklus mit Pruefung ob mind. 1GB
+# @@(#)                          an Archivelogs zur Sicherung anstehen und Pruefung des letzten Archivelog-Sicherungslaufes.
+# @@(#)                          Ist dieser laenger als 54 Minten her, wird ein Backup angestossen.
+# @@(#)
+# @@(#)  6.4  27.01.2016  Thiel  Bei gleichzeitig laufenden ArchiveLog-Backups und incrementellen/full Backups in DG-Umgebungen
+# @@(#)                          konnte es passieren, dass ein Backup dem anderen Backup die Datei /tmp/get_dg_env_>sid< unter dem
+# @@(#)                          Hintern weggeloescht hat. Um dieses zu vermeiden, wurde eine Variable FUNCTION eingefuehrt, die
+# @@(#)                          abhaengig von dem gerade ausgefuehrten Backuptyp gesetzt wird und an den Namen der Datei
+# @@(#)                          angehaengt wird.
+# @@(#)
+# @@(#)  6.5  29.02.2016  Thiel  Bisher konnte es dazu kommen, dass solange kein archiviertes Logfile vorlag, auch nach einer Stunde
+# @@(#)                          kein Archivelog Backup angestossen wurde, da das bisherige Select fehlerhaft war. Das neue Statement
+# @@(#)                          liefert den groesseren Wert zweier Werte. Der erste Wert ist die Zeit in Minuten seit dem letzten
+# @@(#)                          Archivelog-Backup, der zweite Wert ist die Zeit in Minuten seit der Erstellung des aeltesten nicht
+# @@(#)                          gesicherten Archivelogs.
+# @@(#)                          Alle Selects in denen die Tabelle v$archived_log benutzt wird, wurden um die Where-Bedingung
+# @@(#)                          and STANDBY_DEST='NO' erweitert, da sich diese Einträge auf Archivlogs beziehen, die wegen DataGuard
+# @@(#)                          erzeugt werden.
+# @@(#)
+# @@(#)  6.6  10.03.2016  Thiel  Alle Selects in denen die Tabelle v$archived_log benutzt wird, wurden um die Where-Bedingung
+# @@(#)                          and status='A' erweitert. Es sollen nur tatsaechlich noch vorhandene Archivelogs betrachtet werden.
+# @@(#)
+# @@(#)  6.7  18.03.2016  Thiel  Die Funktion check_instance_running eingefuehrt um Fehlermeldungen bei nicht laufender Instanz
+# @@(#)                          zu vermeiden.
+# @@(#)
+# @@(#)  6.8  20.05.2016  Thiel  jede Menge Aenderungen um Proxy-Modus mit neuer NetBackup-Appliance nutzen zu können
+# @@(#)                          - KEINE COMPRESSED backupsets  -> Deduplizierung
+# @@(#)                          - FILESPERSET IMMER 1  -> Deduplizierung
+# @@(#)                          - Da Deduplizierung nur noch FULL BACKUPS (incremental level 0)
+# @@(#)                          - ACHTUNG: PROXY-Syntax beim Backup von Archivelogs NICHT einsetzen, da sonst die Abfragen
+# @@(#)                            in v$archived_log nicht mehr funktionieren.
+# @@(#)
+# @@(#)  6.9  13.06.2016  Thiel  NB_ORA_SERV mit vollem Domaenennamen angegeben, um das nslookup zu erleichtern
+# @@(#)
+# @@(#)  7.0  14.06.2016  Thiel  FILESPERSET bei Sicherung von Archivelogs wieder auf 5 um zu kleine Pakete zu verhindern
+# @@(#)
+# @@(#)  7.1  06.07.2016  Thiel  bei der ARCHIVELOG-Sicherung wird auf der PRIMARY Seite immer
+# @@(#)                             CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY BACKED UP 1 TIMES TO 'SBT_TAPE';
+# @@(#)                          und auf der STANDBY Seite immer
+# @@(#)                             CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
+# @@(#)                          gesetzt. Dies bewirkt, dass bei zu kleiner FRA bzw. besser, zu kleinem Wert fuer db_recovery_file_dest_size,
+# @@(#)                          bei Platzmangel "alte" archivelogs von ORACLE selbststaendig geloescht werden.
+# @@(#)  7.2  12.07.2016  Thiel  Die Aenderung unter 7.1 bewirkte auch bei nicht DG-Instanzen, dass APPLIED ON ALL STANDBY mit in der ARCLOG
+# @@(#)                          DELETION POLICY gesetzt wurde. Dies fuehrte zu Warnungen im RMAN-LOGFILE. Die ARCHIVELOG DELETION POLICY
+# @@(#)                          wird nun mit der Variablen ARCLOGDELPOL gesetzt.
+# @@(#)  7.3  15.08.2016  Thiel  um die Fehlermeldung: ORA-00230: operation disallowed: snapshot control file enqueue unavailable
+# @@(#)                          bei einem Voll- oder Incremental-Backup zu vermeiden, da kurz vorher ein Archivelog-Backup gestartet wurde,
+# @@(#)                          der dann das Snapshot-Controlfile blockiert, wird ein Archivelog-Backup in eine Signaldatei $ORACLE_BASE/arc_bkp_active
+# @@(#)                          (ARCBKPSIGN) die SID der gerade gesicherten Instanz eintragen. Der Voll- bzw. Incremental-Backup-Job wird solange warten,
+# @@(#)                          bis das Archivelog-Backup beendet ist.
+# @@(#)  7.4  31.08.2016  Thiel  die ORACLE_SID_LIST so bilden, dass bei Mehrfachvorkommen einer SID in der rmantab, die SID in der ORACLE_SID_LIST nur
+# @@(#)                          einfach auftritt
+# @@(#)  7.5  22.11.2016  Thiel  Funktion chk_ora_err prueft nun auch auf SP2-. Dieser Fehler tritt auf, wenn das System nicht genuegend Memory hat.
+# @@(#)  7.6  21.07.2017  Thiel  die neue 12er RCVCATP-Instanz auf lxoraccx muss "auch" in den Recovery Catalog in der DBAP gesichert werden
+# @@(#)  7.7  25.10.2017  Thiel  wenn 3. Feld in rmantab gleich "actifio" ==> exit 0 mit entsprechender Meldung
+# @@(#)  7.8  25.01.2018  Pils   changed pwdfile location
+# @@(#)  7.9  16.02.2018  Pils   added functions set_rman_password, check_catalog_connect, set_rman_commands
+# @@(#)                          rman works without rman catalog connection if not working at this time
+# @@(#)  8.0  09.03.2018  Thiel  if an instance is found to be backed up by ACTIFIO, we have to CONTINUE with next instance
+# @@(#)  8.1  17.09.2019  Pils   added -A option for "Archive Log forced" mode. This doesn't exec check_bkp_gap function.
+# @@(#)  8.2  23.01.2020  Thiel  remove host from hostgroup ORA_NBU, if all instances are backed up by actifio
+# @@(#)  8.2.1 23.01.2020 Thiel  minor syntax change
+# @@(#)  8.2.2 21.03.2024 smh    accept new SYS Password restrictions (TADBA-6119)
+# @@(#)  8.2.3 21.03.2024 smh    accept new SYS Password restrictions, 2. Versuch (TADBA-6119)
+# @@(#)  8.2.4 09.04.2024 Pils   Added "" for Oracle Password
+# @(#)-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+set +x                        #to hide script execution content like passwords from sysoutput
+MAILTO="unix-dba@barmenia.de"
+HOST=`hostname -s`
+#LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Backup of Oracle database"
+ORACLE_BASE="/app/oracle"
+#LOGDIR="/app/logs"
+STARTDATE=`date +"%Y-%m-%d"`
+LOGDIR="/app/oracle/admin/log/backup"
+LOGFILE="${LOGDIR}/${SCRIPTNAME}_${STARTDATE}.log"
+TMPSQLOUT="/tmp/$SCRIPTNAME.tmp."`date +%s`
+
+#THI 21.12.2015
+USED_MAX=1024
+USED_MAX_SAV=$USED_MAX
+#THI 21.12.2015
+
+SIGNDAT=$ORACLE_BASE/full_bkp_active
+if [ ! -f $SIGNDAT ]
+then
+   echo "# beinhaltet die SIDs der gerade im FullBackup befindlichen Datenbanken" >$SIGNDAT
+fi
+
+ARCBKPSIGN=$ORACLE_BASE/arc_bkp_active
+if [ ! -f $ARCBKPSIGN ]
+then
+   echo "# beinhaltet die SIDs der gerade im Archivelog-Backup befindlichen Datenbanken" >$ARCBKPSIGN
+fi
+
+source /app/oracle/bin/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+ echo ".bash_functions file not found!"
+ exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+#echo "  Command     : $SCRIPTNAME -a|f|i|c|s [-r 2w|6m|3y|3d] [-p POLICY] [<ORACLE_SID>] "
+echo "  Command     : $SCRIPTNAME -a|A|f|c|s [-r 2w|6m|3y|3d] [-p POLICY] [<ORACLE_SID>] "
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters  : -a,                      Archive Log "
+echo "                -A,                      Archive Log forced (doesn't check backup gap)"
+echo "                -f,                      Full  Backup"
+#echo "                -i,                      Incremental  Backup"
+echo "                -c,                      FRA Backup if Usage > ${FRA_THRESHOLD}%"
+echo "                -s,                      Backup spfile as pfile init<SID>.save"
+echo "                -r,                      Retention-Level (2w|6m|3y|3d)"
+echo "                -p,                      Backup-Policy [ora_linux01|ora_test|...] Default: ora_linux01"
+echo "                -l,                      List backups done"
+echo "                -h,                      help screen"
+echo ""
+echo "  Example     : ${SCRIPTNAME} -a ORATST"
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+echo ""
+exit
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Get SID Environment
+#-----------------------------------------------------------------------------------------------------------------
+function get_sid_env()
+{
+  OH=`grep "^${INST}:" ${ORATAB}`
+  if [ $? -ne 0 ]; then
+     Bmsg -rl $LOGFILE -m "> ORACLE_SID: ${INST} not in ${ORATAB}"
+     echo "${SCRIPTNAME} - ${HOST}: ORACLE_SID ${INST} not in ${ORATAB}" |mail -s "${SCRIPTNAME}" $MAILTO
+     Bmsg -rl $LOGFILE -m "> A mail message was send to ${MAILTO}."
+     Bmsg -sl $LOGFILE -m "#  ${SCRIPTNAME} - script end"
+     exit 255
+  fi
+  ORACLE_SID=${INST}
+  ORACLE_SID_LC=`echo $ORACLE_SID|tr 'A-Z' 'a-z'`
+  ORACLE_HOME=`echo ${OH}|cut -d: -f2`
+  RMAN="${ORACLE_HOME}/bin/rman"
+  RTAB=`grep "^${INST}:" ${RMANTAB}`
+  if [ $? -ne 0 ]; then
+     Bmsg -rl $LOGFILE -m "> ORACLE_SID: ${INST} not in ${RMANTAB}"
+     echo "ORACLE_SID: ${INST} not in ${RMANTAB}" |mail -s "${SCRIPTNAME}" $MAILTO
+     Bmsg -rl $LOGFILE -m "> A mail message was send to ${MAILTO}."
+     Bmsg -sl $LOGFILE -m "#  ${SCRIPTNAME} - script end"
+     exit 255
+  fi
+  BACKUPTYPE=`echo "${RTAB}"|cut -d: -f2`
+  RMANCAT=`echo "${RTAB}"|cut -d: -f3`
+  if [ "$RMANCAT" == "actifio" ]
+  then
+     Bmsg -sl $LOGFILE -m "> ORACLE_SID: ${INST} is configured to be backed up by ACTIFIO"
+     Bmsg -sl $LOGFILE -m "> weiter mit naechster Instanz"
+     check_nbu_usage
+     continue
+  fi
+  RMANUSER=`echo "${RTAB}"|cut -d: -f4`
+  if [ -s $PWDDIR/.pwdfile_db_sys ]
+  then
+     source $PWDDIR/.pwdfile_db_sys
+  else
+     PWDSYS="Sys${ORACLE_SID_LC}56"
+  fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Check if all instances are backed up by actifio
+#-----------------------------------------------------------------------------------------------------------------
+function check_nbu_usage()
+{
+  grep -v -e '^#' -e '^$' -e actifio $RMANTAB >/dev/null
+  if [ $? -eq 1 ] # keine Instanz wird noch mit NetBackup gesichert; Eintrag waere dann rcvcat-n
+  then
+#check membership in hostgroup ORA_NBU
+     HOSTGROUPS=`CTMhostgroup -opt listhg 2>&1 |grep -v -e INFO -e '^hosts:'`
+     for GRP in $HOSTGROUPS
+     do
+        if [ "$GRP" == "ORA_NBU" ]
+        then
+#remove membership from hostgroup ORA_NBU
+           CTMhostgroup -opt delhstfhg -hgroup ORA_NBU
+        fi
+     done
+  fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Check if DB is open
+#-----------------------------------------------------------------------------------------------------------------
+function get_db_values()
+{
+  Bmsg -1m "${SCRIPTNAME} - Get values from database"
+  export ORACLE_HOME=${ORACLE_HOME}
+  export ORACLE_SID=${ORACLE_SID}
+  ${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL
+  connect / as sysdba
+  set serverout on size unlimited feedback off
+  whenever sqlerror exit sql.sqlcode
+  spool $TMPSQLOUT
+  declare
+    l_primary_mode   pls_integer  := 0;
+    l_db_name        varchar2(20) := '';
+    l_db_unique_name varchar2(20) := '';
+    l_dg_broker      pls_integer  := 0;
+  begin
+    select case DATABASE_ROLE when 'PRIMARY' then 1 else 0 end,
+           NAME,
+           DB_UNIQUE_NAME,
+           case DATAGUARD_BROKER when 'ENABLED' then 1 else 0 end
+      into l_primary_mode,l_db_name,l_db_unique_name,l_dg_broker
+      from v\$database;
+    dbms_output.put_line('export IS_PRIMARY='||l_primary_mode);
+    dbms_output.put_line('export DBNAME='||l_db_name);
+    dbms_output.put_line('export DBUNAME='||l_db_unique_name);
+    dbms_output.put_line('export DGUARD='||l_dg_broker);
+  end;
+/
+EOSQL
+  RC=$?
+  if [ "$RC" -eq 0 ]; then
+    source $TMPSQLOUT
+  fi
+  rm $TMPSQLOUT 2>/dev/null
+  return $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Run RMAN
+#-----------------------------------------------------------------------------------------------------------------
+function rmancmd()
+{
+  CMD="
+${RMAN} ${RMANCONNECT} append msglog ${RMANLOGFILE} <<EOF
+$RMAN_STR
+EOF"
+  export ORACLE_HOME=${ORACLE_HOME}
+  Bmsg -l $RMANLOGFILE -m "export ORACLE_HOME=${ORACLE_HOME}"
+  export ORACLE_SID=${INST}
+  Bmsg -l $RMANLOGFILE -m "export ORACLE_SID=${ORACLE_SID}"
+  echo $CMD | sed "s/\/${RMANPWD}@/\/******@/" | sed "s/\/${PWDSYS}@/\/******@/" | tee -a $RMANLOGFILE
+  bash -c "$CMD" >> /dev/null
+  RC=$?
+  if [ $RC -ne 0 ]
+  then
+    SCRIPTRC=100
+    Bmsg -rl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} rman backup failed with RC=$RC"
+    echo "> ${SCRIPTNAME} script: ${INST} ${BACKUPTYPE} rman backup failed with RC=${RC}!" |mail -s "${SCRIPTNAME}" $MAILTO
+    Bmsg -rl $LOGFILE -m "> A mail message was send to ${MAILTO}."
+  else
+    Bmsg -gl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} rman backup successfully finished."
+  fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: List Backups
+#-----------------------------------------------------------------------------------------------------------------
+function listbackups()
+{
+  ${RMAN} ${RMANCONNECT} <<EOF
+  list backup of database summary;
+  list backup of archivelog all summary;
+EOF
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Check FRA Usage
+#-----------------------------------------------------------------------------------------------------------------
+function check_fra()
+{
+  export ORACLE_HOME=${ORACLE_HOME}
+  export ORACLE_SID=${ORACLE_SID}
+  FRA_USAGE=0
+  #Gets Fast Recovery Area Usage
+  FRA_USAGE=$(${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL
+  connect / as sysdba
+  set serverout on size unlimited feedback off
+  declare
+    l_fra_usage pls_integer := 0;
+  begin
+    select round(sum(PERCENT_SPACE_USED)-sum(PERCENT_SPACE_RECLAIMABLE)) into l_fra_usage
+      from v\$flash_recovery_area_usage;
+    dbms_output.put_line(l_fra_usage);
+  end;
+/
+exit
+EOSQL
+)
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+# chk_ora_err
+#-----------------------------------------------------------------------------------------------------------------
+chk_ora_err ()
+{
+OERR=`grep -e "ORA-" -e "SP2-" $SQLRESULT`
+
+if [ "$OERR" != "" ]
+then
+   RC=1
+fi
+}
+
+#THI 21.12.2015
+check_bkp_gap ()
+{
+# Ermittelt die Minutenzahl seit dem letzten Archivelog-Backup
+# ---------------------------------------------------------------------------
+MESSAGE="The time gap since last archivelog backup could not be determined!"
+SQLRESULT=/tmp/result_sql2.lst
+${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL2 >/dev/null
+connect / as sysdba
+set termout off;
+set feed off;
+set hea off;
+spool $SQLRESULT;
+select nvl(max(minuten),0) as minutes
+from(select round((sysdate-min(completion_time))*24*60,0) as MINUTEN
+from v\$archived_log
+where BACKUP_COUNT=0
+and status='A'
+and standby_dest='NO'
+union
+select round((sysdate-max(completion_time))*24*60,0) as MINUTEN
+from v\$archived_log
+where BACKUP_COUNT>0
+and status='A'
+and standby_dest='NO');
+EOSQL2
+
+chk_ora_err
+if [ $RC -eq 0 ]
+then
+   BKP_GAP=`cat $SQLRESULT|tail -1|sed s/' '//g`
+else
+   Bmsg -rl $RMANLOGFILE -m "$MESSAGE"
+   MESSAGE=`cat $SQLRESULT|tail -1`
+   Bmsg -rl $RMANLOGFILE -m "$MESSAGE"
+   exit 1
+fi
+rm $SQLRESULT
+
+if [ $BKP_GAP -gt 54 ]
+then
+   MESSAGE="${INST} starting FORCED archive of redo log files as last backup occured $BKP_GAP minutes before!"
+   USED_MAX=0
+   USED=0
+#  echo "USED_MAX1: $USED_MAX#" >>$LOG
+else
+   Bmsg -bl $RMANLOGFILE -m "${INST} Backup will not be started as last backup occured $BKP_GAP minutes before!"
+fi
+}
+
+get_used ()
+{
+# Ermittelt die Summe der noch nicht gesicherten ARCHIVELOGS
+# ---------------------------------------------------------------------------
+MESSAGE="The count of archivelogs not backed up could not be determined!"
+SQLRESULT=/tmp/result_sql1.lst
+${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL1 >/dev/null
+connect / as sysdba
+set termout off;
+set feed off;
+set hea off;
+spool $SQLRESULT;
+select count(*)
+from V\$archived_log
+where BACKUP_COUNT = 0
+and status='A'
+and standby_dest='NO';
+EOSQL1
+
+chk_ora_err
+if [ $RC -eq 1 ]
+then
+   Bmsg -sl $RMANLOGFILE -m "$MESSAGE"
+   exit 1
+fi
+
+ARCCOUNT=`cat $SQLRESULT|tail -1|sed s/' '//g`
+rm $SQLRESULT 2>/dev/null
+if [ $ARCCOUNT -eq 0 ]
+then
+   USED=0
+#  echo "USED1: $USED#" >>$LOG
+else
+   MESSAGE="The amount of archivelogs not backed up could not be determined!"
+   SQLRESULT=/tmp/result_sql2.lst
+${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL1 >/dev/null
+connect / as sysdba
+set termout off;
+set feed off;
+set hea off;
+spool $SQLRESULT;
+select case (round((sum(blocks*block_size)/1024/1024),0)) when NULL then 0 else (round((sum(blocks*block_size)/1024/1024),0)) end  as MB
+from V\$archived_log
+where BACKUP_COUNT = 0
+and status='A'
+and standby_dest='NO';
+EOSQL1
+
+   chk_ora_err
+   if [ $RC -eq 0 ]
+   then
+      USED=`cat $SQLRESULT|tail -1|sed s/' '//g`
+   else
+      Bmsg -rl $RMANLOGFILE -m "$MESSAGE"
+      exit 1
+   fi
+#  echo "USED2: $USED#" >>$LOG
+   rm $SQLRESULT 2>/dev/null
+fi
+}
+#THI 21.12.2015
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Backup Spfile as Pfile
+#-----------------------------------------------------------------------------------------------------------------
+function backup_spfile()
+{
+  Bmsg -sl $LOGFILE -m "> ${INST} - Create Pfile backup from Spfile to \$ORACLE_HOME/dbs/init${ORACLE_SID_UC}.save"
+  Bmsg -1m "${SCRIPTNAME} - Create Pfile backup from Spfile to \$ORACLE_HOME/dbs/init${ORACLE_SID_UC}.save"
+  ${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL
+  connect / as sysdba
+  create pfile='${ORACLE_HOME}/dbs/init${ORACLE_SID}.save' from spfile;
+exit
+EOSQL
+
+  if ! [ -d /oranfs/share/ora_admin/Backup/${DBUNAME} ]; then
+    mkdir /oranfs/share/ora_admin/Backup/${DBUNAME}
+  fi
+  cp -p ${ORACLE_HOME}/dbs/init${ORACLE_SID}.save /oranfs/share/ora_admin/Backup/${DBUNAME}/
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: cleanup_signdat
+#-----------------------------------------------------------------------------------------------------------------
+cleanup_signdat ()
+{
+grep -v $INST $SIGNDAT >/tmp/${ORACLE_SID}_full_bkp_active
+mv /tmp/${ORACLE_SID}_full_bkp_active $SIGNDAT
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: cleanup_arcbkpsign
+#-----------------------------------------------------------------------------------------------------------------
+cleanup_arcbkpsign ()
+{
+grep -v $INST $ARCBKPSIGN >/tmp/${ORACLE_SID}_arc_bkp_active
+mv /tmp/${ORACLE_SID}_arc_bkp_active $ARCBKPSIGN
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: check_instance_running
+#-----------------------------------------------------------------------------------------------------------------
+check_instance_running()
+{
+SMON=`ps -ef|grep -i smon|grep ${INST}|tail -1|awk '{print $NF}'`
+if [ ! "$SMON" == "ora_smon_${INST}" ] # SMON nicht gefunden; Instanz laueft nicht
+then
+   grep ${INST} /app/oracle/inst_int_down >/dev/null 2>&1
+   if [ $? -eq 0 ] # Instanz absichtlich aus
+   then
+      Bmsg -gl $LOGFILE -m "Die Instanz ${INST} laueft nicht!"
+      Bmsg -gl $LOGFILE -m "Die Instanz ist absichtlich aus!"
+      return 1
+   else
+      Bmsg -gl $LOGFILE -m "ERR: Die Instanz ${INST} laueft nicht!"
+      return 1
+   fi
+fi
+return 0
+}
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: get_dg_nb_ora_client
+#-----------------------------------------------------------------------------------------------------------------
+get_dg_nb_ora_client()
+{
+Bmsg -l $LOGFILE -m "retrieve NB_ORA_CLIENT from RMAN configuration"
+RMAN_STR="
+show channel;
+exit
+"
+SQLRESULT="/tmp/get_dg_env_${ORACLE_SID}_${FUNCTION}"
+CMD="
+${RMAN} ${RMANCONNECT} msglog ${SQLRESULT} <<EOF
+$RMAN_STR
+EOF"
+echo $CMD | sed "s/\/${RMANPWD}@/\/******@/" | sed "s/\/${PWDSYS}@/\/******@/"
+bash -c "$CMD" >> /dev/null
+chk_ora_err
+if [ $RC -eq 0 ]
+then
+   NEW_NB_ORA_CLIENT=`awk -F, '{for(i=1;i<=NF;i++) {print $i}}' $SQLRESULT |grep NB_ORA_CLIENT|awk -F= '{print $2}'`
+   if [ "NEW_NB_ORA_CLIENT" == "" ]
+   then
+      Bmsg -rl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} NB_ORA_CLIENT could not be found in RMAN configuration!"
+      echo "> ${SCRIPTNAME} script: ${HOST} ${INST} ${BACKUPTYPE} NB_ORA_CLIENT could not be found in RMAN configuration!" |mail -s "${SCRIPTNAME}" $MAILTO
+   else
+      NB_ENV_DB=`echo $NB_ENV_DB|sed s/"$NB_ORA_CLIENT"/"$NEW_NB_ORA_CLIENT"/`
+      NB_ENV_LOG=`echo $NB_ENV_LOG|sed s/"$NB_ORA_CLIENT"/"$NEW_NB_ORA_CLIENT"/`
+   fi
+else
+   RMANMSG="rman command to retrieve NB_ORA_CLIENT from RMAN configuration failed with RC=${RC}!
+$OERR"
+   Bmsg -rl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} ${RMANMSG}"
+   echo "> ${SCRIPTNAME} script: ${HOST} ${INST} ${BACKUPTYPE} ${RMANMSG}" |mail -s "${SCRIPTNAME}" $MAILTO
+   exit
+fi
+rm $SQLRESULT
+Bmsg -gl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} retrieved NB_ORA_CLIENT from RMAN configuration successfully!"
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Set RMANPWD variable depentends on db instance
+#-----------------------------------------------------------------------------------------------------------------
+set_rman_password() {
+  if [ "$INST" == "RCVCAT" -o "$INST" == "RCVCATP" ]; then
+    RMANPWD=${PWDRCAT_USR}
+  else
+    RMANPWD=${PWDRMAN}
+  fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Check rman catalog availablility and set CATALOGCONNECT string
+#-----------------------------------------------------------------------------------------------------------------
+check_catalog_connect() {
+  Bmsg -l $LOGFILE -m "check RMAN catalog connection"
+  if [ $(${ORACLE_HOME}/bin/tnsping ${RMANCAT} >>/dev/null; echo $?) -ne 0 ]; then
+    TNSPINGOK=0
+    RCATCHECK=0
+  else
+    TNSPINGOK=1
+    RCATCHECK=$(${ORACLE_HOME}/bin/sqlplus -s /nolog <<EOSQL
+    connect ${RMANUSER}/"${RMANPWD}"@${RMANCAT}
+    set pages 0 feedback off
+    select 1 from dual;
+EOSQL
+)
+    RCATCHECK=$(echo -e "${RCATCHECK}" | tr -d '[:space:]')
+  fi
+
+  if [[ ${TNSPINGOK} -eq 1 && "${RCATCHECK}" == "1" ]]; then
+    #rman catalog available
+    CATALOGCHECKOK=1
+    CATALOGCONNECT="catalog ${RMANUSER}/'${RMANPWD}'@${RMANCAT}"
+  else
+    #rman catalog not available
+    CATALOGCHECKOK=0
+    Bmsg -rl $LOGFILE -m "RMAN catalog connection check failed!"
+    CATALOGCONNECT=""
+  fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Set rman commands depends on database configuration
+#-----------------------------------------------------------------------------------------------------------------
+set_rman_commands() {
+  if [ $CATALOGCHECKOK -eq 1 ]; then
+    CATALOGCONNECT="catalog ${RMANUSER}/'${RMANPWD}'@${RMANCAT}"
+  else
+    CATALOGCONNECT=""
+  fi
+  RESYNCCATALOG=""
+  if [ "$DGUARD" == "1" ]; then
+     if [ $IS_PRIMARY -eq 1 ]; then
+        RMANCONNECT="target sys/'${PWDSYS}'@${DBNAME}-BKP ${CATALOGCONNECT}"
+        ARCLOGDELPOL="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY BACKED UP 1 TIMES TO 'SBT_TAPE';"
+     else
+        RMANCONNECT="target sys/'${PWDSYS}'@${DBUNAME} ${CATALOGCONNECT}"
+        ARCLOGDELPOL="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;"
+     fi
+     if  [ $CATALOGCHECKOK -eq 1 ]; then
+       #RESYNCCATALOG="resync catalog from db_unique_name all;"
+       RESYNCCATALOG="resync catalog from db_unique_name ${DBUNAME};"
+     fi
+     get_dg_nb_ora_client
+  else
+     RMANCONNECT="target / ${CATALOGCONNECT}"
+     ARCLOGDELPOL="CONFIGURE ARCHIVELOG DELETION POLICY TO BACKED UP 1 TIMES TO 'SBT_TAPE';"
+  fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  Bmsg -rm "Script may not run as user `id -un`, it must be started and run as oracle"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Set Environment
+#-----------------------------------------------------------------------------------------------------------------
+ORATAB="/etc/oratab"
+RMANTAB="${ORACLE_BASE}/admin/config/backup/rmantab"
+#BPCONF="${ORACLE_BASE}/bp.conf"
+SCRIPTRC=0
+ARCHIVELOG=0
+FULL=0
+INCREMENTAL=0
+FRACHECK=0
+SPBACKUP=0
+LSBACKUP=0
+RETLEVEL=0
+NBOP=0
+FRA_THRESHOLD=70  # %FRA usage as threshold to start FRA backup
+FUNCTION="BKP"
+PWDDIR=/app/oracle/admin/etc/pwddir
+source $PWDDIR/.pwdfile_db_rman
+source $PWDDIR/.pwdfile_db_rcat_usr
+##### NB_ORA_POLICY setzen #####
+NB_ORA_POLICY='ora_linux01'
+export NLS_DATE_FORMAT='DD.MM.YYYY HH24:MI:SS'
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Opts
+#-----------------------------------------------------------------------------------------------------------------
+FORCE=0
+MOVE=0
+while getopts haAcfislr:p: option; do
+  case $option in
+    a ) ARCHIVELOG=1;
+        FUNCTION="ARCHIVELOG";
+        MOVE=`expr $MOVE + 1 `;;
+    A ) ARCHIVELOG=1;
+        FUNCTION="ARCHIVELOG";
+        FORCE=1;
+        MOVE=`expr $MOVE + 1 `;;
+    f ) FULL=1;
+        FUNCTION="FULL";
+        MOVE=`expr $MOVE + 1 `;;
+    i ) INCREMENTAL=1;
+        FUNCTION="FULL";
+        MOVE=`expr $MOVE + 1 `;;
+    c ) FRACHECK=1;
+        FUNCTION="FRACHECK";
+        MOVE=`expr $MOVE + 1 `;;
+    s ) SPBACKUP=1;
+        FUNCTION="SPBACKUP";
+        MOVE=`expr $MOVE + 1 `;;
+    r ) RETLEVEL=1;
+        RET=$OPTARG;
+        MOVE=`expr $MOVE + 2 `;;
+    p ) NBOP=1;
+        NB_ORA_POLICY=$OPTARG;
+        MOVE=`expr $MOVE + 2 `;;
+    l ) LSBACKUP=1;
+        MOVE=`expr $MOVE + 1 `;;
+    h ) usage ;;
+    * ) usage ;;
+  esac
+done
+
+#-----------------------------------------------------------------------------------------------------------------
+#     check retention level
+#-----------------------------------------------------------------------------------------------------------------
+if [ $RETLEVEL -eq 1 ]
+then
+   case $RET in
+      2w|6m|3y|3d) echo >/dev/null;;
+                *) echo;
+                   Bmsg -rm "Der Retention-Level >$1< wird nicht unterstuetzt!";
+                   usage;;
+   esac
+   if [ "$RET" == "3d" ]
+   then
+      if [ $NBOP -eq 0 ]
+      then
+         echo
+         Bmsg -rm "Wenn der Retention Level >3d< mitgegeben wird, muss zwingend die Policy >ora_test< genutzt werden!"
+         usage
+      else
+         if [ "$NB_ORA_POLICY" != "ora_test" ]
+         then
+            echo
+            Bmsg -rm "Wenn der Retention Level >3d< mitgegeben wird, muss zwingend die Policy >ora_test< genutzt werden!"
+            usage
+         fi
+      fi
+   fi
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Sanity check
+#-----------------------------------------------------------------------------------------------------------------
+SUMOPT=`expr $ARCHIVELOG + $FULL + $INCREMENTAL + $FRACHECK + $SPBACKUP + $LSBACKUP`
+if [ $SUMOPT -eq 0 ]; then
+  echo
+  Bmsg -rm "Ein Parameter a|f|i|c|s|l MUSS angegeben werden!"
+  usage
+elif [ $SUMOPT -gt 1 ]; then
+  echo
+  Bmsg -rm "Es darf NUR EIN Parameter a|f|i|c|s|l angegeben werden!"
+  usage
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get ORACLE_SID from input parameter or RMANTAB
+#-----------------------------------------------------------------------------------------------------------------
+##### get it from input parameter ##
+shift $MOVE
+ORACLE_SID_LIST=$1
+
+##### get it from RMANTAB ##########
+if [ "x" == "x${ORACLE_SID_LIST}" ]; then
+  ORACLE_SID_LIST=`grep -v "^#" ${RMANTAB}|cut -d: -f1|sort|uniq`
+else
+  ORACLE_SID_UC=`echo $ORACLE_SID_LIST|tr 'a-z' 'A-Z'`
+  ORACLE_SID_LC=`echo $ORACLE_SID_LIST|tr 'A-Z' 'a-z'`
+  ORACLE_SID_LIST=${ORACLE_SID_UC}
+fi
+
+##### NB_ORA_SCHED setzen #####
+#NB_ORA_SCHED='Appl-Bckp-2w'
+case $RET in
+#         2w) NB_ORA_SCHED='Appl-Bckp-2w';;
+#         6m) NB_ORA_SCHED='Appl-Bckp-6m';;
+#         3y) NB_ORA_SCHED='Appl-Bckp-3y';;
+#         3d) NB_ORA_SCHED='Appl-Bckp-3d';;
+         2w) NB_ORA_SCHED_DB='Database_2w'
+             NB_ORA_SCHED_LOG='Redologs_2w';;
+         6m) NB_ORA_SCHED_DB='Database_6m'
+             NB_ORA_SCHED_LOG='Redologs_6m';;
+         3y) NB_ORA_SCHED_DB='Database_3y'
+             NB_ORA_SCHED_LOG='Redologs_3y';;
+         3d) NB_ORA_SCHED_DB='Database_3d'
+             NB_ORA_SCHED_LOG='Redologs_3d';;
+         *)  NB_ORA_SCHED_DB='Database_2w'
+             NB_ORA_SCHED_LOG='Redologs_2w';;
+esac
+
+##### NB_ORA_CLIENT setzen #####
+NB_ORA_CLIENT=`hostname -s`
+
+##### NB_ORA_SERV setzen #####
+NB_ORA_SERV=nbu1.barmenia.de
+
+##### NB_ENV setzen #####
+NB_ENV_DB="send 'NB_ORA_PC_STREAMS=2,NB_ORA_SERV=${NB_ORA_SERV},NB_ORA_CLIENT=${NB_ORA_CLIENT},NB_ORA_POLICY=${NB_ORA_POLICY},NB_ORA_SCHED=${NB_ORA_SCHED_DB},NB_ORA_PC_SCHED=${NB_ORA_SCHED_DB}';"
+NB_ENV_LOG="send 'NB_ORA_PC_STREAMS=1,NB_ORA_SERV=${NB_ORA_SERV},NB_ORA_CLIENT=${NB_ORA_CLIENT},NB_ORA_POLICY=${NB_ORA_POLICY},NB_ORA_SCHED=${NB_ORA_SCHED_LOG},NB_ORA_PC_SCHED=${NB_ORA_SCHED_LOG}';"
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+Bmsg -sl $LOGFILE -m "#  ${SCRIPTNAME} - script start"
+Bmsg -b "Global script actions are logged in ${LOGFILE}!"
+
+##### run backup for every SID #####
+for INST in $ORACLE_SID_LIST
+do
+  check_instance_running
+  if [ "$?" -eq 1 ] # Instanz laeuft nicht
+  then
+     continue   #naechste INST aus $ORACLE_SID_LIST
+  fi
+  get_sid_env
+  get_db_values
+  if [ "$?" -ne 0 ]; then
+    Bmsg -rl $LOGFILE -m "> ${INST} retrieving db values failed. Backup will be skipped."
+    continue
+  fi
+
+  set_rman_password
+  check_catalog_connect
+  set_rman_commands
+
+  if [ "${BACKUPTYPE}" == "skip" ]; then
+    NOBACKUP=1
+    Bmsg -l $LOGFILE -m "> ${SCRIPTNAME} - ${INST} skip backup"
+    continue
+  fi
+
+  if [ $LSBACKUP -eq 1 ]; then
+    listbackups
+    continue
+  fi
+
+  if [ $SPBACKUP -eq 1 ]; then
+    backup_spfile
+    continue
+  fi
+
+  if [ "${IS_PRIMARY}" -ne 1 ]; then
+    #
+    # Backups on Data Guard StandBy Side
+    #
+
+    # FULL Backup
+    if [ $FULL -eq 1 ]; then
+      backup_spfile
+    fi
+
+    # ArchiveLog Backup
+    if [ $ARCHIVELOG -eq 1 ]; then
+    #  echo "RMAN delete archivelog"
+       BACKUPTYPE="archive"
+       Bmsg -sl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} rman delete archivelog started."
+       RMANLOGFILE="${LOGDIR}/${INST}_${BACKUPTYPE}_${STARTDATE}.log"
+       Bscriptstart -l $RMANLOGFILE "${SCRIPTNAME} - ${INST} ${BACKUPTYPE} rman backup"
+RMAN_STR="
+$RESYNCCATALOG
+$ARCLOGDELPOL
+delete noprompt archivelog all completed before 'sysdate-1';
+"
+       echo $INST >>$ARCBKPSIGN
+       rmancmd
+       cleanup_arcbkpsign
+       Bscriptend -l $RMANLOGFILE
+    #
+    fi
+    continue
+  else
+    #
+    # Backups on Non DataGuard and Data Guard Primary Side
+    #
+
+    # FULL Backup
+    if [ $FULL -eq 1 ]; then
+      backup_spfile
+
+      while :
+      do
+         grep $INST $ARCBKPSIGN >/dev/null
+         if [ $? -eq 0 ]; then
+            Bmsg -bl $LOGFILE -m "> ${INST} - Full backup will be paused for 1 minute, as archivelog backup active!"
+            sleep 60
+         else
+            break
+         fi
+      done
+      echo $INST >> $SIGNDAT
+      BACKUPTYPE="full"
+      Bmsg -sl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} rman backup started."
+      RMANLOGFILE="${LOGDIR}/${INST}_${BACKUPTYPE}_${STARTDATE}.log"
+      Bscriptstart -l $RMANLOGFILE "${SCRIPTNAME} - ${INST} ${BACKUPTYPE} rman backup"
+RMAN_STR="
+run{
+ALLOCATE CHANNEL ch1 TYPE 'SBT_TAPE';
+$NB_ENV_DB
+$RESYNCCATALOG
+backup as backupset filesperset 1 proxy format 'FULL_%d_%s_%p_%t' incremental level 0 database include current controlfile;
+$NB_ENV_LOG
+backup filesperset 5 format 'ARCH_%d_%s_%p_%t' archivelog all not backed up 1 times;
+delete noprompt archivelog all completed before 'sysdate-1';
+}"
+      rmancmd
+      Bscriptend -l $RMANLOGFILE
+      cleanup_signdat
+    fi
+
+    # INCREMENTAL Backup
+    if [ $INCREMENTAL -eq 1 ]; then
+      while :
+      do
+         grep $INST $ARCBKPSIGN >/dev/null
+         if [ $? -eq 0 ]; then
+            Bmsg -bl $LOGFILE -m "> ${INST} - Incremental backup will be paused for 1 minute, as archivelog backup active!"
+            sleep 60
+         else
+            break
+         fi
+      done
+      echo $INST >> $SIGNDAT
+      BACKUPTYPE="incremental"
+      Bmsg -sl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} rman backup started."
+      RMANLOGFILE="${LOGDIR}/${INST}_${BACKUPTYPE}_${STARTDATE}.log"
+      Bscriptstart -l $RMANLOGFILE "${SCRIPTNAME} - ${INST} ${BACKUPTYPE} backup"
+RMAN_STR="
+run{
+ALLOCATE CHANNEL ch1 TYPE 'SBT_TAPE';
+ALLOCATE CHANNEL ch2 TYPE 'SBT_TAPE';
+$NB_ENV_DB
+$RESYNCCATALOG
+backup as backupset filesperset 1 proxy format 'FULL_%d_%s_%p_%t' incremental level 0 database include current controlfile;
+$NB_ENV_LOG
+backup filesperset 5 format 'ARCH_%d_%s_%p_%t' archivelog all not backed up 1 times;
+delete noprompt archivelog all completed before 'sysdate-1';
+}"
+      rmancmd
+      Bscriptend -l $RMANLOGFILE
+      cleanup_signdat
+    fi
+
+    # ArchiveLog Backup
+    if [ $ARCHIVELOG -eq 1 ]; then
+      grep $INST $SIGNDAT >/dev/null
+      if [ $? -eq 0 ]; then
+         Bmsg -bl $LOGFILE -m "> ${INST} - Archivelog backup will not be started, as full backup active!"
+         continue
+      fi
+      BACKUPTYPE="archive"
+      Bmsg -sl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} rman backup started."
+
+#THI 21.12.2015
+      RMANLOGFILE="${LOGDIR}/${INST}_${BACKUPTYPE}_${STARTDATE}.log"
+      Bscriptstart -l $RMANLOGFILE "${SCRIPTNAME} - ${INST} ${BACKUPTYPE} rman backup"
+      if [ ${FORCE} -ne 1 ]; then
+         check_bkp_gap
+      fi
+      if [ ${USED_MAX} -ne 0 ]
+      then
+         get_used
+         MESSAGE="${INST} Logfiles belegen  ${USED} MB!"
+      fi
+      if [ ${USED} -ge ${USED_MAX} -o ${FORCE} -eq 1 ]
+      then
+#THI 21.12.2015
+         Bscriptstart -l $RMANLOGFILE "${SCRIPTNAME} - ${INST} ${BACKUPTYPE} rman backup"
+#THI 21.12.2015
+         Bmsg -sl $RMANLOGFILE -m "$MESSAGE"
+#THI 21.12.2015
+         RMAN_STR="
+run{
+ALLOCATE CHANNEL ch1 TYPE 'SBT_TAPE';
+$NB_ENV_LOG
+$RESYNCCATALOG
+$ARCLOGDELPOL
+backup filesperset 5 format 'ARCH_%d_%s_%p_%t' archivelog all not backed up 1 times;
+delete noprompt archivelog all completed before 'sysdate-1';
+}"
+         echo $INST >>$ARCBKPSIGN
+         rmancmd
+         cleanup_arcbkpsign
+#THI 21.12.2015
+      else
+         Bmsg -sl $RMANLOGFILE -m "${INST} Logfiles occupy only  ${USED} MB  --> Backup will not be started!"
+      fi
+#THI 21.12.2015
+      Bscriptend -l $RMANLOGFILE
+    fi
+
+    # FRA Backup if threshold is exceeded
+    if [ $FRACHECK -eq 1 ]; then
+      grep $INST $SIGNDAT >/dev/null
+      if [ $? -eq 0 ]; then
+         Bmsg -bl $LOGFILE -m "> ${INST} - FRA-Backup wird nicht gestartet, da ein Database Backup aktiv!"
+         continue
+      fi
+      BACKUPTYPE="fra"
+      Bmsg -sl $LOGFILE -m "> ${INST} - ${BACKUPTYPE} rman backup started."
+      check_fra
+      if [ $FRA_USAGE -gt $FRA_THRESHOLD ]; then
+        Bscriptstart -l $RMANLOGFILE "${SCRIPTNAME} - ${INST} ${BACKUPTYPE} rman backup"
+        Bmsg -bl $LOGFILE -m "> ${INST} - fra rman backup will be started [fra usage ${FRA_USAGE}% > ${FRA_THRESHOLD}%]"
+        RMANLOGFILE="${LOGDIR}/${INST}_${BACKUPTYPE}_${STARTDATE}.log"
+RMAN_STR="
+run{
+ALLOCATE CHANNEL ch1 TYPE 'SBT_TAPE';
+$NB_ENV_LOG
+$RESYNCCATALOG
+backup proxy DB_RECOVERY_FILE_DEST;
+}"
+        echo $INST >>$ARCBKPSIGN
+        rmancmd
+        cleanup_arcbkpsign
+        Bscriptend -l $RMANLOGFILE
+      else
+        Bscriptstart "${SCRIPTNAME} - ${INST} ${BACKUPTYPE} rman backup"
+        Bmsg -bl $LOGFILE -m "> ${INST} - fra rman backup not required [fra usage ${FRA_USAGE}% <= ${FRA_THRESHOLD}%]"
+        Bscriptend
+      fi
+    fi
+  fi
+done
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+Bmsg -sl $LOGFILE -m "#  ${SCRIPTNAME} - script end"
+Bmsg -b "Global script actions are logged in ${LOGFILE}!"
+exit $SCRIPTRC
+

@@ -1,0 +1,563 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAr2iExpdp
+# @(#) Author      : Dieter Smets
+# @(#) Modified    :
+# @(#)
+# @(#) Description : This script reads the Refresh2I Control Table and generates and executes Datapump Exports from Cohesity Point in Time Clone
+# @(#)
+# @(#) Version     : 1.6
+# @(#) Datum       : 01.07.2024
+# @(#)
+# @(#) Presumption :
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)  0.1  2023-04-03  Smets       Created
+# @@(#)  0.2  2023-05-31  Smets       Read Entry from new R2I Control Table: BVDBS.R2I_EXPORT_BY_DBNAME
+# @@(#)  0.3  2023-06-01  Smets       change some directories
+# @@(#)  0.4  2023-06-02  Smets       some minor changes
+# @@(#)  0.5  2023-07-18  Smets       Added DBNAME to tmp-File because of parallel processing
+# @@(#)  0.6  2023-07-26  Smets       Added Runtimes to Cntl Tables, changed Variable names
+# @@(#)  0.7  2023-07-27  Smets       Added further Runtimes to Cntl Tables
+# @@(#)  0.8  2023-07-27  Smets       Added PARALLEL Option for Datapump parfiles
+# @@(#)  0.9  2023-07-28  Smets       Error in UPDATE BVDBS.R2I_OID corrected
+# @@(#)  0.10 2023-07-28  Smets       Corrected Syntax Error
+# @@(#)  0.11 2023-07-28  Smets       Added Option "--sga 4096" to "COHcloneOracle.sh" call
+# @@(#)  0.12 2023-07-31  Smets       Added Szenario Name to DMP- and LOG-Files for better Cleanup
+# @@(#)  0.13 2023-08-01  Smets       Changed some Times to store in Control Table
+# @@(#)  0.14 2023-08-01  Smets       Changed Datapump PARALLEL Options
+# @@(#)  0.15 2023-08-03  Smets       Change Clone Name to be different from orig. DB Name
+# @@(#)  1.0  2023-08-10  Smets       Added Import Option: transform=disable_archive_logging:y
+# @@(#)  1.1  2023-08-10  Smets       Changed TMP File Names
+# @@(#)  1.2  2023-08-29  Smets       Added EXCLUDE=PASSWORD_HISTORY to Import Parfile
+# @@(#)  1.3  2023-08-31  Smets       Support of new Control Table/View Structures
+# @@(#)  1.4  2024-01-10  Smets       Added -xc and -xdp Parms to exclude Clone creation / Datapump Export
+# @@(#)  1.5  2024-04-09  MPils       Added "" for Oracle Password
+# @@(#)  1.6  2024-07-01  Jahr        removed .sh from scriptname COHcloneOracle.sh and COHdestroyOracle.sh 
+# @(#) ================================================================================================================
+set +x
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+PRINTOUT=0   # wird evtl. spaeter mal als optionaler Parameter implementiert ???
+CTMRUN=0     #
+SCRIPTNAME=$(basename $0)
+SCRIPTDIR=/app/oracle/bin
+SCRIPTSHORTDESC="This script reads the Refresh2I Control Table and generates and executes Datapump Exports from Cohesity Point in Time Clone
+"
+PWDDIR=/app/oracle/admin/etc/pwddir
+FILETS=`date +%Y%m%d_%H%M%S`
+ORAr2iExpdp_SYSOUT=/app/oracle/admin/log
+SYSOUT=${ORAr2iExpdp_SYSOUT}/${SCRIPTNAME}-SYSOUT-${FILETS}.log
+echo ${SYSOUT}
+
+#-----------------------------------------------------------------------
+# Logger Script
+#-----------------------------------------------------------------------
+#
+source /app/oracle/bin/ORAlib
+Logger
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+if [ $help -eq 1 ]
+then
+   RC=0
+else
+   RC=1
+fi
+
+echo ""
+echo "  Command     : $SCRIPTNAME $R2ISZ_OS SZENARIO $DB_OS DBNAME $TS_OS YYYY-MM-DD_HH24:MI:SS"
+echo ""
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters  : $R2ISZ_OPT,        Refresh2I Szenario from View BVDBS.R2I_EXPORT_BY_DBNAME@DBAP"
+echo "                $DB_OPT,        Oracle Database Name, e.g. pshp"
+echo "                $TS_OPT,         PIT Timestamp, Format (YYYY-MM-DD_HH24:MI:SS) "
+echo "                $XC_OPT,             suppress Clone creation, e.g. after abort of Datapump"
+echo "                $XDP_OPT,      	suppress Clone creation and Datapump Export"
+echo "                $H_OPT,            help screen"
+echo ""
+echo "  Example     : ${SCRIPTNAME} $DB_OS pshp $TS_OS 2020-12-31_15:00:00 $S_OS bvpshadm,bvmscadm "
+echo ""
+
+# Change Ownership of Log-Files to "oinstall":
+for LOGFILES in `find ${DDL_DEPLOY_SYSOUT} -name "${SCRIPTNAME}*" -user "$USER" -group barmstaf`
+do
+chgrp oinstall $LOGFILES
+done
+
+remove_tmpfiles
+
+exit $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Get User/Password depending on Run-Environment (Control-M or Foreground)
+#-----------------------------------------------------------------------------------------------------------------
+function get_user_and_pwd
+{
+   set +x     # suppress PWD listing
+   # Get Password from PasswordFile:
+   DBAUSER=BVBTCUSR
+   source $PWDDIR/.pwdfile_db_bvbtcusr
+   DBAPASS=${PWDBVBTCUSR}
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Get Entry from Refresh2I Control Table
+#-----------------------------------------------------------------------------------------------------------------
+function get_r2i_control_entry
+{
+  TMPFILE=/tmp/$(basename $0)${SOURCE_DB}$(date +%Y%m%d%H%M%S)
+
+# # Prepare SQLPLUS execution:
+  export ORACLE_HOME=`grep 'HOME NAME="db' /app/oraInventory/ContentsXML/inventory.xml|grep -v REMOVED|awk -F= '{print $3}'|awk -F\" '{print $2}'|tail -1`
+  PATH=$PATH:$ORACLE_HOME/bin
+
+  (
+  sqlplus -s ${DBAUSER}/"${DBAPASS}"@DBA-P <<EOSQL
+    set pagesize 0
+    SELECT TRIM(R.SOURCE_DBNAME)||'/'||TRIM(R.SCHEMA_LIST) FROM BVDBS.R2I_EXPORT_BY_DBNAME R
+     WHERE R.SZENARIO = '${SZENARIO}'
+       AND UPPER(R.SOURCE_DBNAME) = '${SOURCE_DB}'
+    ;
+EOSQL
+  ) > $TMPFILE
+  SQLOUT=$(cat $TMPFILE|tr -d '\n')
+  if [ "${SQLOUT}" == "no rows selected" ]
+     then
+        echo "Ausfuehrung beendet - ${SOURCE_DB} fuer ${SZENARIO} nicht relevant! RC=0 gesetzt. "
+        RC=0
+        rm $TMPFILE
+        exit $RC
+  fi
+  SCHEMA_LIST=$(awk 'BEGIN { FS = "/" } ; { print $2 }' $TMPFILE)
+  rm $TMPFILE
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Execute Datapump Export
+#-----------------------------------------------------------------------------------------------------------------
+function execute_datapump_export
+{
+#-- Translate PITTS to YYYYMMDD_HHMMSS Format, because of DumpFileName:
+EXPTS=`echo $PITTS |sed 's/[^0-9_]//g'`
+EXPFILES=/oranfs/share/ora_admin/DataPump/r2i/exports
+IMPFILES=/oranfs/share/ora_admin/DataPump/r2i/impdp
+
+# Save Schemalist into Array:
+TMPARRAY=(${SCHEMA_LIST})
+# # Build single Schema Array for Export Loop:
+  IFS=', ' read -r -a array <<< ${SCHEMA_LIST}
+  TMPARRAY=("${array[@]}")
+
+for SCHEMA in "${TMPARRAY[@]}"
+do
+  MESSAGE="Start Datapump Export of Schema ${SCHEMA}"
+  logger_info "${MESSAGE}";
+  echo " "
+
+# # Build Dumpfile Name:
+  DMPFILE=${SOURCE_DB}_${SCHEMA}
+
+# # Build Export Parameter File:
+  EXP_PARM=${EXPFILES}/tmp/${DMPFILE}.expparm
+  EXP_SYSOUT=${EXPFILES}/tmp/${DMPFILE}.sysout
+
+  cat <<EOVAR >${EXP_PARM}
+  schemas=${SCHEMA}
+  content=all
+  compression=all
+  EXCLUDE=STATISTICS
+  METRICS=Y
+  LOGTIME=ALL
+  directory=DPEXP
+  REUSE_DUMPFILES=Y
+  PARALLEL=8
+  PARALLEL_THRESHOLD=1024M
+  dumpfile=r2i_${SZENARIO}_${DMPFILE}_${EXPTS}_%u.dmp
+  logfile=r2i_${SZENARIO}_${DMPFILE}_${EXPTS}.explog
+EOVAR
+  START_TS_EXPORT=`date +"%Y-%m-%d_%T"` # Format: YYYY-MM-DD_hh:mi:ss to store in R2I Control Table
+  START_TIME_EXPORT=$(date +%s)
+
+# #  Run Datapump Export
+  expdp ${DBAUSER}/${DBAPASS} parfile=${EXP_PARM}  2>${EXP_SYSOUT}
+  RC=$?
+
+  if [ ${RC} -gt 0 ]
+     then
+       logger_error "*************************************************************"
+       logger_error "* Fehler bei Datapump Export"
+#       logger_error "* Siehe ${EXP_SYSOUT}"
+       RC=1
+       logger_error "* RC=${RC}"
+       logger_error "*************************************************************"
+       cat ${EXP_SYSOUT}
+       remove_tmpfiles
+       exit ${RC}
+  fi
+
+#  END_TIME_EXPORT=$(date +%s);
+#  ELAPSED_TIME_EXPORT=$(($END_TIME_EXPORT-$START_TIME_EXPORT));
+#  ((sec=ELAPSED_TIME_EXPORT%60, ELAPSED_TIME_EXPORT/=60, min=ELAPSED_TIME_EXPORT%60, hrs=ELAPSED_TIME_EXPORT/60))
+#  ELAPSED_TIME_EXPORT=$(printf "%02d:%02d:%02d" $hrs $min $sec)
+
+  END_TS_EXPORT=`date +"%Y-%m-%d_%T"` # Format: YYYY-MM-DD_hh:mi:ss to store in R2I Control Table
+
+  write_r2i_control_table_exp
+
+# # Build corresponding Datapump Import Parameter File (for Refresh2I Process):
+  cat <<EOVAR >${IMPFILES}/${DMPFILE}.impdp
+  content=all
+  DATA_OPTIONS=SKIP_CONSTRAINT_ERRORS
+  EXCLUDE=GRANT
+  EXCLUDE=STATISTICS
+  EXCLUDE=PASSWORD_HISTORY
+  transform=disable_archive_logging:y
+  directory=DPEXP
+  METRICS=Y
+  LOGTIME=ALL
+  PARALLEL=8
+  PARALLEL_THRESHOLD=1024M
+  dumpfile=r2i_${SZENARIO}_${DMPFILE}_${EXPTS}_%u.dmp
+  logfile=DPR2I:r2i_${SZENARIO}_${DMPFILE}_${EXPTS}.implog
+EOVAR
+
+  MESSAGE="Datapump Export finished: ${DMPFILE}_${EXPTS}."
+  logger_info "${MESSAGE}";
+  echo " "
+
+done
+
+#rm ${dmpfile}.expparm
+
+}
+##-----------------------------------------------------------------------------------------------------------------
+##     FUNCTION: Write Run Times and ExecutionTS to r2i_control_table
+##-----------------------------------------------------------------------------------------------------------------
+function write_r2i_control_table_clone
+{
+  echo ${SZENARIO}
+  echo ${SOURCE_DB}
+  echo ${ELAPSED_TIME_ALL}
+
+  (
+  sqlplus -s ${DBAUSER}/"${DBAPASS}"@DBA-P <<EOSQL
+   MERGE INTO BVDBS.R2I_RUNTIMES_DBLEVEL RTDB
+   USING (SELECT
+                 '${SZENARIO}'                                           AS SZENARIO
+                ,'${SOURCE_DB}'                                          AS SOURCE_DBNAME
+                ,TO_TIMESTAMP('$START_TS_CLONE','YYYY-MM-DD_HH24:MI:SS') AS EXPORT_PROCESS_STARTED
+                ,TO_TIMESTAMP('$END_TS_CLONE','YYYY-MM-DD_HH24:MI:SS')   AS COH_CLONE_ENDED
+                ,TO_TIMESTAMP('$END_TS_ALL','YYYY-MM-DD_HH24:MI:SS')     AS EXPORT_PROCESS_ENDED
+                FROM dual ) RW2
+   ON (
+            RTDB.SZENARIO       = RW2.SZENARIO
+        AND RTDB.SOURCE_DBNAME  = RW2.SOURCE_DBNAME
+      )
+   WHEN MATCHED THEN UPDATE SET
+                 RTDB.EXPORT_PROCESS_STARTED      = RW2.EXPORT_PROCESS_STARTED
+                ,RTDB.COH_CLONE_ENDED      = RW2.COH_CLONE_ENDED
+                ,RTDB.EXPORT_PROCESS_ENDED      = RW2.EXPORT_PROCESS_ENDED
+   WHEN NOT MATCHED THEN INSERT ( RTDB.SZENARIO
+                                 ,RTDB.SOURCE_DBNAME
+                                 ,RTDB.EXPORT_PROCESS_STARTED
+                                 ,RTDB.COH_CLONE_ENDED
+                                 ,RTDB.EXPORT_PROCESS_ENDED
+                                )
+                         VALUES ( RW2.SZENARIO
+                                 ,RW2.SOURCE_DBNAME
+                                 ,RW2.EXPORT_PROCESS_STARTED
+                                 ,RW2.COH_CLONE_ENDED
+                                 ,RW2.EXPORT_PROCESS_ENDED
+                                )
+;
+EOSQL
+  )
+}
+##-----------------------------------------------------------------------------------------------------------------
+##     FUNCTION: Write Run Times and ExecutionTS to r2i_control_table
+##-----------------------------------------------------------------------------------------------------------------
+function write_r2i_control_table_exp
+{
+  echo ${SZENARIO}
+  echo ${SOURCE_DB}
+  echo ${SCHEMA}
+  (
+  sqlplus -s ${DBAUSER}/"${DBAPASS}"@DBA-P <<EOSQL
+   MERGE INTO BVDBS.R2I_RUNTIMES_SCHEMALEVEL RTDB
+   USING (SELECT
+                 '${SZENARIO}'                                            AS SZENARIO
+                ,'${SOURCE_DB}'                                           AS SOURCE_DBNAME
+                ,'${SCHEMA}'                                              AS SCHEMA_NAME
+                ,TO_TIMESTAMP('$START_TS_EXPORT','YYYY-MM-DD_HH24:MI:SS') AS EXPORT_STARTED
+                ,TO_TIMESTAMP('$END_TS_EXPORT','YYYY-MM-DD_HH24:MI:SS')   AS EXPORT_ENDED
+                FROM dual ) RW2
+   ON (
+            RTDB.SZENARIO       = RW2.SZENARIO
+        AND RTDB.SOURCE_DBNAME  = RW2.SOURCE_DBNAME
+        AND RTDB.SCHEMA_NAME    = RW2.SCHEMA_NAME
+      )
+   WHEN MATCHED THEN UPDATE SET
+                 RTDB.EXPORT_STARTED      = RW2.EXPORT_STARTED
+                ,RTDB.EXPORT_ENDED        = RW2.EXPORT_ENDED
+   WHEN NOT MATCHED THEN INSERT ( RTDB.SZENARIO
+                                 ,RTDB.SOURCE_DBNAME
+                                 ,RTDB.SCHEMA_NAME
+                                 ,RTDB.EXPORT_STARTED
+                                 ,RTDB.EXPORT_ENDED
+                                )
+                         VALUES ( RW2.SZENARIO
+                                 ,RW2.SOURCE_DBNAME
+                                 ,RW2.SCHEMA_NAME
+                                 ,RW2.EXPORT_STARTED
+                                 ,RW2.EXPORT_ENDED
+                                )
+;
+EOSQL
+  )
+}
+##-----------------------------------------------------------------------------------------------------------------
+##     FUNCTION: REMOVE 4 log/err Files:
+##-----------------------------------------------------------------------------------------------------------------
+function remove_tmpfiles
+{
+#echo $DDLDEPLOY_RUNLOG
+#echo $ERRFIL
+#echo $RCLISTE
+#echo $TMP_SPOOL
+#if [ -f "$DDLDEPLOY_RUNLOG" ]; then	rm  "$DDLDEPLOY_RUNLOG";
+#fi
+#if [ -f "$ERRFIL" ];           then rm  "$ERRFIL";
+#fi
+#if [ -f "$RCLISTE" ];          then rm  "$RCLISTE"
+#fi
+#if [ -f "$TMP_SPOOL" ];        then rm  "$TMP_SPOOL"
+#fi
+echo ' '
+}
+#-----------------------------------------------------------------------------------------------------------------
+#     END of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+#set -x
+R2ISZ_OS="-sz"; R2ISZ_OL="--sz";           R2ISZ_OPT="$R2ISZ_OS[|$R2ISZ_OL]"
+DB_OS="-db"; DB_OL="--db_name";            DB_OPT="$DB_OS[|$DB_OL]"
+TS_OS="-ts"; TS_OL="--pit-ts";             TS_OPT="$TS_OS[|$TS_OL]"
+XC_OS="-xc"; XC_OL="--xc";                 XC_OPT="$XC_OS[|$XC_OL]"
+XDP_OS="-xdp"; XDP_OL="--xdp";             XDP_OPT="$XDP_OS[|$XDP_OL]"
+H_OS="-h"; H_OL="--help";                  H_OPT="$H_OS[|$H_OL]"
+
+
+help=0
+xc=0
+xdp=0
+
+if [ $# -eq 0 ]
+then
+   usage
+else
+  while [ $# -gt 0 ]; do
+    case "$1" in
+        $R2ISZ_OS | $R2ISZ_OL )
+        SZENARIO="$2"
+        szenario=1
+        shift 2;;
+      $DB_OS | $DB_OL )
+        SOURCE_DB="$2"
+        SOURCE_DB=`echo $SOURCE_DB|tr [a-z] [A-Z]`
+        dbname=1
+        shift 2;;
+      $TS_OS | $TS_OL )
+        PITTS="$2"
+        pitts=1
+        shift 2;;
+      $XC_OS | $XC_OL )
+        xc=1
+        shift 1;;
+      $XDP_OS | $XDP_OL )
+        xdp=1
+        shift 1;;
+      $H_OS | $H_OL )
+        help=1
+        usage;;
+      * )
+        echo "*************************************************************"
+        echo "* Parameter Error at '$1'"
+        echo "*************************************************************"
+        usage;;
+    esac
+  done
+fi
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the mandatory options
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" == "x$szenario" ]; then
+  MESSAGE="$R2ISZ_OPT Option is required!"
+  logger_error "$MESSAGE"
+  remove_tmpfiles
+  exit 1
+fi
+if [ "x" == "x$dbname" ]; then
+  MESSAGE="$DB_OPT Option is required!"
+  logger_error "$MESSAGE"
+  remove_tmpfiles
+  exit 1
+fi
+if [ "x" == "x$pitts" ]; then
+  MESSAGE="$TS_OPT Option is required!"
+  logger_error "$MESSAGE"
+  remove_tmpfiles
+  exit 1
+fi
+#-----------------------------------------------------------------------------------------------------------------
+#     evaluate conditional options
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------
+#     Main Processing
+#-----------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------
+
+# Change Ownership of Log-Files to "oinstall":
+#for LOGFILES in `find ${DDL_DEPLOY_SYSOUT} -name "${SCRIPTNAME}*" -user "$USER" -group barmstaf`
+#do
+#chgrp oinstall $LOGFILES
+#done
+
+#cd ${INPUTDIR}
+#if [ ! -d ${INPUTDIR}/logs ];
+#then
+#    umask 0002
+#    mkdir ${INPUTDIR}/logs
+#fi
+
+#logger_info "All actions are logged in ${SYSOUT}!"
+#MESSAGE="All actions are logged in ${SYSOUT}!"
+#echo "${MESSAGE}" >> ${DDLDEPLOY_RUNLOG}
+#logger_info "${MESSAGE}";
+
+echo " "
+RC=0
+set -x
+get_user_and_pwd
+set -x
+get_r2i_control_entry
+
+# Build COH-Clone Name by replacing the last Char (=Stage) of the DBNAME with the corresponding ORDER_COUNT of Table BVCMDB.LST_STAGE:
+CLONE_DB=`echo ${SOURCE_DB} | sed 's/.$//'`        # Strip last Char
+CLONE_STAGE="${SOURCE_DB:0-1}"                     # Save last Char (Stage)
+
+case "${CLONE_STAGE}" in
+P)  CLONE_STAGE=1
+    ;;
+I)  CLONE_STAGE=2
+    ;;
+F)  CLONE_STAGE=3
+    ;;
+K)  CLONE_STAGE=4
+    ;;
+E)  CLONE_STAGE=5
+    ;;
+*)  CLONE_STAGE=7
+    ;;
+esac
+CLONE_DB=${CLONE_DB}${CLONE_STAGE}
+
+if [ ${xc} -ne 1 ] && [ ${xdp} -ne 1 ]; then
+
+   MESSAGE="Execute COHcloneOracle to build Clone ${CLONE_DB} from Backup of ${SOURCE_DB} to PIT: ${PITTS}."
+   #echo "${MESSAGE}" >> ${DDLDEPLOY_RUNLOG}
+   logger_info "${MESSAGE}";
+   echo " "
+   #set -x
+
+   START_TS_CLONE=`date +"%Y-%m-%d_%T"` # Format: YYYY-MM-DD_hh:mi:ss to store in R2I Control Table
+   START_TIME_CLONE=$(date +%s)
+
+   COHcloneOracle --sourcedb ${SOURCE_DB} --targetdb ${CLONE_DB} --timestamp "${PITTS}" --sga 4096
+   RC=$?
+   if [ ${RC} -gt 0 ]
+      then
+        logger_error "*************************************************************"
+        logger_error "* Fehler bei COHcloneOracle"
+        logger_error "* Siehe ${SYSOUT}"
+        RC=1
+        logger_error "* RC=${RC}"
+        logger_error "*************************************************************"
+        remove_tmpfiles
+        exit ${RC}
+   fi
+
+   END_TS_CLONE=`date +"%Y-%m-%d_%T"` # Format: YYYY-MM-DD_hh:mi:ss to store in R2I Control Table
+
+   MESSAGE="COHcloneOracle finished."
+   logger_info "${MESSAGE}";
+   echo " "
+else
+   MESSAGE="COHcloneOracle has been suppressed because of -xc or -xdp option."
+   logger_info "${MESSAGE}";
+   echo " "
+fi
+
+if [ ${xdp} -ne 1 ]; then
+
+   MESSAGE="Start Datapump Export(s)."
+   logger_info "${MESSAGE}";
+   echo " "
+
+   . dbset ${CLONE_DB} >/dev/null
+
+   execute_datapump_export;
+
+
+   MESSAGE="Datapump Export(s) finished."
+   logger_info "${MESSAGE}";
+   echo " "
+else
+   MESSAGE="Datapump Export(s) has been suppressed because of -xdp option."
+   logger_info "${MESSAGE}";
+   echo " "
+fi
+
+MESSAGE="Start COHdestroyOracle to Tear Down Clone of ${SOURCE_DB} (${CLONE_DB})."
+logger_info "${MESSAGE}";
+echo " "
+
+COHdestroyOracle -o ${CLONE_DB}
+RC=$?
+if [ ${RC} -gt 0 ]
+   then
+     logger_error "*************************************************************"
+     logger_error "* Fehler bei COHdestroyOracle"
+     logger_error "* Siehe ${SYSOUT}"
+     RC=1
+     logger_error "* RC=${RC}"
+     logger_error "*************************************************************"
+     remove_tmpfiles
+     exit ${RC}
+fi
+
+MESSAGE="COHdestroyOracle finished."
+logger_info "${MESSAGE}";
+echo " "
+MESSAGE="$SCRIPTNAME finished."
+logger_info "${MESSAGE}";
+echo " "
+
+END_TS_ALL=`date +"%Y-%m-%d_%T"` # Format: YYYY-MM-DD_hh:mi:ss to store in R2I Control Table
+
+# Write the Clone Runtime only if Export was successful:
+write_r2i_control_table_clone
+
+exit ${RC}

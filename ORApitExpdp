@@ -1,0 +1,429 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORApitExpdp 
+# @(#) Author      : Dieter Smets
+# @(#) Modified    :
+# @(#)
+# @(#) Description : This script creates a Cohesity Point in Time Clone, runs an Oracle Datapump Export and removes the Clone
+# @(#)
+# @(#) Version     : 2.0
+# @(#) Datum       : 01.07.2024
+# @(#)
+# @(#) Presumption :
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)  0.1  2023-04-03  Smets       Created
+# @@(#)  1.0  2023-04-13  Smets       End Messages added
+# @@(#)  1.1  2023-05-11  Smets       Target DBName = Source DBName, DMPFileName with PITTS
+# @@(#)  1.2  2023-05-16  Smets       added Parameter -xss (Export Single Schemas)
+# @@(#)  1.3  2023-06-01  Smets       change some directories
+# @@(#)  1.4  2023-08-03  Smets       Added PARALLEL Options to Export-/Import PARFILES
+# @@(#)                   Smets       Added new optional Parm -cldb, so a specific Name of the Clone can be given
+# @@(#)  1.5  2023-08-07  Smets       some minor Text Changes
+# @@(#)  1.6  2023-11-14  Smets       add -sga parameter to COHcloneOracle.sh script
+# @@(#)  1.7  2024-01-04  Smets       Added -xc and -xdp Parms to exclude Clone creation / Datapump Export
+# @@(#)  1.8  2024-01-10  Smets       Added "else" messages after -xc and -xdp Parm checks
+# @@(#)  1.9  2024-05-11  jahr        Changed COHcloneOracle.sh to COHcloneOracle
+# @@(#)  2.0  2024-05-11  jahr        Removed .sh from COHdestroyOracle
+# @(#) ================================================================================================================
+set +x
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+SCRIPTNAME=$(basename $0)
+SCRIPTDIR=/app/oracle/bin
+SCRIPTSHORTDESC="This script creates a Cohesity Point in Time Clone, runs Oracle Datapump Export(s) and removes the Clone
+"
+PWDDIR=/app/oracle/admin/etc/pwddir
+FILETS=`date +%Y%m%d_%H%M%S`
+COHbuildORAexport_SYSOUT=/app/oracle/admin/log
+SYSOUT=${COHbuildORAexport_SYSOUT}/${SCRIPTNAME}-SYSOUT-${FILETS}.log
+#echo ${SYSOUT}
+        
+#-----------------------------------------------------------------------
+# Logger Script
+#-----------------------------------------------------------------------
+#
+source /app/oracle/bin/ORAlib
+Logger
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+if [ $help -eq 1 ]
+then
+   RC=0
+else
+   RC=1
+fi
+
+echo ""
+echo "  Command     : $SCRIPTNAME $DB_OS DBNAME $TS_OS YYYY-MM-DD_HH24:MI:SS $S_OS SCHEMA [-$CLDB_OS CLONENAME] [-$XSS_OS] "
+echo ""
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters  : $DB_OPT,        Oracle Database Name, e.g. pshp"
+echo "                $CLDB_OPT, Clone Database Name, optional, Default is: the original Database Name"
+echo "                $TS_OPT,         PIT Timestamp, Format (YYYY-MM-DD_HH24:MI:SS) "
+echo "                $S_OPT,      Schema/Schemalist, Comma-separeted"
+echo "                $XSS_OPT,           run separate Exports per Schema, optional, Default is: one Export of whole Schema List"
+echo "                $XC_OPT,             suppress Clone creation, e.g. after abort of Datapump"
+echo "                $XDP_OPT,      	suppress Clone creation and Datapump Export"
+echo "                $H_OPT,            help screen"
+echo ""
+echo ""
+echo "  Example     : ${SCRIPTNAME} $DB_OS pshp $TS_OS 2020-12-31_15:00:00 $S_OS bvpshadm,bvmscadm $CLDB_OS pshp_rec $XSS_OS "
+echo ""
+
+# Change Ownership of Log-Files to "oinstall":
+for LOGFILES in `find ${DDL_DEPLOY_SYSOUT} -name "${SCRIPTNAME}*" -user "$USER" -group barmstaf`
+do
+chgrp oinstall $LOGFILES
+done
+
+remove_tmpfiles
+
+exit $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Get User/Password depending on Run-Environment (Control-M or Foreground)
+#-----------------------------------------------------------------------------------------------------------------
+function get_user_and_pwd
+{
+   set +x     # suppress PWD listing
+   # Get Password from PasswordFile:
+   DBAUSER=BVBTCUSR
+   source $PWDDIR/.pwdfile_db_bvbtcusr
+   DBAPASS=${PWDBVBTCUSR}
+}
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Execute Datapump Export
+#-----------------------------------------------------------------------------------------------------------------
+function execute_datapump_export
+{
+#-- Translate PITTS to YYYYMMDD_HHMMSS Format, because of DumpFileName: 
+EXPTS=`echo $PITTS |sed 's/[^0-9_]//g'`
+EXPFILES=/oranfs/share/ora_admin/DataPump/COHclone/exports
+IMPFILES=/oranfs/share/ora_admin/DataPump/COHclone/impdp
+
+# Save Schemalist into Array:
+TMPARRAY=(${DBSCHEMA})
+if [ ${xss} -eq 1 ]; then
+# # Build single Schema Array for Export Loop: 
+  IFS=', ' read -r -a array <<< ${DBSCHEMA}
+  TMPARRAY=("${array[@]}")
+else
+# # Build Array for Dumpfile Name, with or without Schemaname:
+  IFS=', ' read -r -a array <<< ${DBSCHEMA}
+  XXXARRAY=("${array[@]}")
+fi
+
+for SCHEMA in "${TMPARRAY[@]}"
+do 
+  MESSAGE="Start Datapump Export of Schema ${SCHEMA}"
+  logger_info "${MESSAGE}";
+  echo " "
+
+# # Build Dumpfile Name, with or without Schemaname:
+
+  DBSNAME=${DB_NAME}_${CLONENAME}
+  if [ ${xss} -eq 1 ] || [ ${#XXXARRAY[@]} -eq 1 ]; then
+    DBSNAME=${DB_NAME}_${CLONENAME}_${SCHEMA}
+  fi
+
+# # Build Export Parameter File:  
+  EXP_PARM=${EXPFILES}/tmp/${DBSNAME}_${EXPTS}.expparm
+  EXP_SYSOUT=${EXPFILES}/tmp/${DBSNAME}_${EXPTS}.sysout
+
+  cat <<EOVAR >${EXP_PARM}
+  schemas=${SCHEMA}
+  content=all
+  compression=all
+  EXCLUDE=STATISTICS
+  METRICS=Y
+  LOGTIME=ALL  
+  PARALLEL=8
+  PARALLEL_THRESHOLD=1024M
+  #flashback_time=sysdate
+  directory=DPEXP
+  REUSE_DUMPFILES=Y
+  dumpfile=${DBSNAME}_${EXPTS}_%u.dmp
+  logfile=${DBSNAME}_${EXPTS}.explog
+EOVAR
+
+# #  Run Datapump Export
+  expdp ${DBAUSER}/${DBAPASS} parfile=${EXP_PARM}  2>${EXPFILES}/tmp/${DBSNAME}_${EXPTS}.sysout
+  RC=$?
+
+  if [ ${RC} -gt 0 ]
+     then
+       logger_error "*************************************************************"
+       logger_error "* Fehler bei Datapump Export"
+#       logger_error "* Siehe ${EXPFILES}/tmp/${DBSNAME}_${EXPTS}.sysout"
+       RC=1
+       logger_error "* RC=${RC}"
+       logger_error "*************************************************************"
+       cat ${EXPFILES}/tmp/${DBSNAME}_${EXPTS}.sysout
+       remove_tmpfiles
+       exit ${RC}
+  fi
+
+# # Build corresponding Datapump Import Parameter File:
+  cat <<EOVAR >${IMPFILES}/${DBSNAME}.impdp
+  content=all
+  DATA_OPTIONS=SKIP_CONSTRAINT_ERRORS
+  EXCLUDE=GRANT
+  EXCLUDE=STATISTICS
+  METRICS=Y
+  LOGTIME=ALL  
+  PARALLEL=8
+  PARALLEL_THRESHOLD=1024M
+  directory=DPEXP
+  dumpfile=${DBSNAME}_${EXPTS}_%u.dmp
+  logfile=${DBSNAME}_${EXPTS}.implog
+EOVAR
+  
+  MESSAGE="Datapump Export finished: ${DBSNAME}_${EXPTS}"
+  logger_info "${MESSAGE}";
+  echo " "
+
+done
+
+#rm ${dmpfile}.expparm
+
+}
+#-----------------------------------------------------------------------------------------------------------------
+##     FUNCTION: REMOVE 4 log/err Files:
+##-----------------------------------------------------------------------------------------------------------------
+function remove_tmpfiles
+{
+#echo $DDLDEPLOY_RUNLOG
+#echo $ERRFIL
+#echo $RCLISTE
+#echo $TMP_SPOOL
+#if [ -f "$DDLDEPLOY_RUNLOG" ]; then	rm  "$DDLDEPLOY_RUNLOG";
+#fi
+#if [ -f "$ERRFIL" ];           then rm  "$ERRFIL";
+#fi
+#if [ -f "$RCLISTE" ];          then rm  "$RCLISTE"
+#fi
+#if [ -f "$TMP_SPOOL" ];        then rm  "$TMP_SPOOL"
+#fi
+echo ' '
+}
+#-----------------------------------------------------------------------------------------------------------------
+#     END of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+#set -x
+DB_OS="-db"; DB_OL="--db_name";            DB_OPT="$DB_OS[|$DB_OL]"
+CLDB_OS="-cldb"; CLDB_OL="--clone_dbname"; CLDB_OPT="$CLDB_OS[|$CLDB_OL]"
+S_OS="-s"; S_OL="--schemalist";            S_OPT="$S_OS[|$S_OL]"
+TS_OS="-ts"; TS_OL="--pit-ts";             TS_OPT="$TS_OS[|$TS_OL]"
+XSS_OS="-xss"; XSS_OL="--xss";             XSS_OPT="$XSS_OS[|$XSS_OL]"
+XC_OS="-xc"; XC_OL="--xc";                 XC_OPT="$XC_OS[|$XC_OL]"
+XDP_OS="-xdp"; XDP_OL="--xdp";             XDP_OPT="$XDP_OS[|$XDP_OL]"
+H_OS="-h"; H_OL="--help";                  H_OPT="$H_OS[|$H_OL]"
+
+
+help=0
+xss=0
+xc=0
+xdp=0
+
+if [ $# -eq 0 ]
+then
+   usage
+else
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      $DB_OS | $DB_OL )
+        DB_NAME="$2"
+        DB_NAME=`echo $DB_NAME|tr [a-z] [A-Z]`
+        DB_NAME_LC=`echo $DB_NAME|tr [A-Z] [a-z]`
+        db_name=1
+        shift 2;;
+      $CLDB_OS | $CLDB_OL )
+        CLONENAME="$2"
+        CLONENAME=`echo $CLONENAME|tr [a-z] [A-Z]`
+        CLONENAME_LC=`echo $CLONENAME|tr [A-Z] [a-z]`
+        clonename=1
+        shift 2;;
+      $S_OS | $S_OL )
+        DBSCHEMA="$2"
+        DBSCHEMA=`echo $DBSCHEMA|tr [a-z] [A-Z]`
+        dbschema=1
+        shift 2;;
+      $TS_OS | $TS_OL )
+        PITTS="$2"
+        pitts=1
+        shift 2;;
+      $XSS_OS | $XSS_OL )
+        xss=1
+        shift 1;;
+      $XC_OS | $XC_OL )
+        xc=1
+        shift 1;;
+      $XDP_OS | $XDP_OL )
+        xdp=1
+        shift 1;;
+      $H_OS | $H_OL )
+        help=1
+        usage;;
+      * )
+        echo "*************************************************************"
+        echo "* Parameter Error at '$1'"
+        echo "*************************************************************"
+        usage;;
+    esac
+  done
+fi
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the mandatory options
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" == "x$db_name" ]; then
+  MESSAGE="$DB_OPT Option is required!"
+  logger_error "$MESSAGE"
+  remove_tmpfiles
+  exit 1
+fi
+if [ "x" == "x$clonename" ]; then
+  CLONENAME=${DB_NAME}
+fi
+if [ "x" == "x$dbschema" ]; then
+  MESSAGE="$S_OPT Option is required!"
+  logger_error "$MESSAGE"
+  remove_tmpfiles
+  exit 1
+fi
+if [ "x" == "x$pitts" ]; then
+  MESSAGE="$TS_OPT Option is required!"
+  logger_error "$MESSAGE"
+  remove_tmpfiles
+  exit 1
+fi
+#-----------------------------------------------------------------------------------------------------------------
+#     evaluate conditional options
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     build STAGE from DBNAME (TNS-Service Name)
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------
+#     Main Processing
+#-----------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------
+
+#rm -f ${SYSOUT}
+#SYSOUT=${DDL_DEPLOY_SYSOUT}/${SCRIPTNAME}-SYSOUT-${DB_NAME}-${FILETS}.log
+
+
+# Change Ownership of Log-Files to "oinstall":
+#for LOGFILES in `find ${DDL_DEPLOY_SYSOUT} -name "${SCRIPTNAME}*" -user "$USER" -group barmstaf`
+#do
+#chgrp oinstall $LOGFILES
+#done
+
+#cd ${INPUTDIR}
+#if [ ! -d ${INPUTDIR}/logs ];
+#then
+#    umask 0002
+#    mkdir ${INPUTDIR}/logs
+#fi
+
+#logger_info "All actions are logged in ${SYSOUT}!"
+#MESSAGE="All actions are logged in ${SYSOUT}!"
+#echo "${MESSAGE}" >> ${DDLDEPLOY_RUNLOG}
+#logger_info "${MESSAGE}";
+
+echo " "
+RC=0
+
+if [ ${xc} -ne 1 ] && [ ${xdp} -ne 1 ]; then
+
+   MESSAGE="Execute COHcloneOracle to build Clone ${CLONENAME} from ${DB_NAME} to PIT: ${PITTS}"
+   #echo "${MESSAGE}" >> ${DDLDEPLOY_RUNLOG}
+   logger_info "${MESSAGE}";
+   echo " "
+   #set -x
+   COHcloneOracle --sourcedb ${DB_NAME} --targetdb ${CLONENAME} --timestamp "${PITTS}" --sga 4096
+   RC=$?
+   if [ ${RC} -gt 0 ]
+      then
+        logger_error "*************************************************************"
+        logger_error "* Fehler bei COHcloneOracle"
+        logger_error "* Siehe ${SYSOUT}"
+        RC=1
+        logger_error "* RC=${RC}"
+        logger_error "*************************************************************"
+        remove_tmpfiles
+        exit ${RC}
+   fi
+   
+   MESSAGE="COHcloneOracle finished."
+   logger_info "${MESSAGE}";
+   echo " "
+else 
+   MESSAGE="COHcloneOracle has been suppressed because of -xc or -xdp option."
+   logger_info "${MESSAGE}";
+   echo " " 
+fi
+
+if [ ${xdp} -ne 1 ]; then
+
+   MESSAGE="Start Datapump Export(s)"
+   logger_info "${MESSAGE}";
+   echo " "
+   
+   . dbset $CLONENAME >/dev/null
+   
+   get_user_and_pwd
+   execute_datapump_export;
+   
+   
+   MESSAGE="Datapump Export(s) finished."
+   logger_info "${MESSAGE}";
+   echo " "
+else 
+   MESSAGE="Datapump Export(s) has been suppressed because of -xdp option."
+   logger_info "${MESSAGE}";
+   echo " " 
+fi
+
+MESSAGE="Start COHdestroyOracle to Tear Down Clone of ${DB_NAME}"
+logger_info "${MESSAGE}";
+echo " "
+
+COHdestroyOracle -o ${CLONENAME}
+RC=$?
+if [ ${RC} -gt 0 ]
+   then
+     logger_error "*************************************************************"
+     logger_error "* Fehler bei COHdestroyOracle"
+     logger_error "* Siehe ${SYSOUT}"
+     RC=1
+     logger_error "* RC=${RC}"
+     logger_error "*************************************************************"
+     remove_tmpfiles
+     exit ${RC}
+fi
+
+MESSAGE="COHdestroyOracle finished."
+logger_info "${MESSAGE}";
+echo " "
+MESSAGE="$SCRIPTNAME finished."
+logger_info "${MESSAGE}";
+echo " "
+
+
+exit ${RC}

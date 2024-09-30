@@ -1,0 +1,459 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#)  File        : ORAemcli
+# @(#)  Author      : Marcel Pils
+# @(#)  Modified    :
+# @(#)
+# @(#)  Description : This script generate emcli commands to manage EM12c targets.
+# @(#)
+# @(#)  Version     : 1.3.5
+# @(#)  Datum       : 20.05.2021
+# @(#)
+# @(#)  Attention   : This script must be started as user oracle
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)    1.0     2012-12-13  Pils     Created
+# @@(#)    1.01    2018-01-25  Pils     changed pwddir location
+# @@(#)    1.2     12.05.2021  Thi      added option for outputfile
+# @@(#)    1.2.1   12.05.2021  Thi      changed all functions to write to outputfile
+# @@(#)    1.2.2   12.05.2021  Thi      changed output format slightly
+# @@(#)    1.3     14.05.2021  Thi      added function det_agent_port
+# @@(#)    1.3.1   14.05.2021  Thi      of course, we have to call function det_agent_port
+# @@(#)    1.3.2   14.05.2021  Thi      suppress emctl output
+# @@(#)    1.3.3   14.05.2021  Thi      some messages are not neccessary, normally
+# @@(#)    1.3.4   17.05.2021  Thi      added function deploy_agent
+# @@(#)    1.3.5   20.05.2021  Thi      stop agent before deleting it
+# @(#) ================================================================================================================
+# ----------------------------------------------------------------------------------------------------------------
+#set -x
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+#MAILTO="unix-dba@barmenia.de"
+HOST=`hostname -s`
+LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Generate emcli commands to manage EM12c targets"
+ORACLE_BASE="/app/oracle"
+SCRIPTPATH="/app/oracle/bin"
+PWDDIR="/app/oracle/admin/etc/pwddir"
+EMCLIPWDFILE="${PWDDIR}/.pwdfile_emcli_dbsnmp"
+FUNCTIONSFILE="${SCRIPTPATH}/.bash_functions"
+LOGDIR="/app/logs"
+LOGFILE="${LOGDIR}/${SCRIPTNAME}_`date +%Y%m%d%H%M%S%N`.log"
+OMSSERVER=oraoms.unix.lan
+
+source $FUNCTIONSFILE
+RC=$?
+if [ $RC -ne 0 ]; then
+ echo "${FUNCTIONSFILE} file not found!"
+ exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : $SCRIPTNAME"
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters:   -act,                     Action (ADD|DEL|MOD|SET)"
+echo "                -sid,                     Database Name "
+echo "                -sys,                     Systemstufe (P|I|F|K|E|Z)"
+echo "                -out,                     path and name of ooutput file "
+echo ""
+echo "  Example     : ORAemcli -act add -sid mptest -sys p"
+echo "              : ORAemcli -act del -sid mptest"
+echo "              : ORAemcli -act mod -sid mptest -out /oranfs/share/ora_admin/mig19c/EM_Config/mptest.sh"
+echo "              : ORAemcli -act set -sid mptest -sys e"
+echo ""
+echo "  Attention   : This script must be started as user oracle"
+echo ""
+exit
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is not oracle, otherwise abort   
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  Bmsg -rm "Script may not run as user `id -un`, it must be started and run as user oracle!"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if running on oms host
+#-----------------------------------------------------------------------------------------------------------------
+if [ "$HOST" == "lxxmy" ] || [ "$HOST" == "lxn33" ]; then
+  Bmsg -rm "Please mind running this script on <TARGET> host!"
+  Bmsg -rm "You are on OMS-Host actually!\n"
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if DBNAME and DBUNAME environment variable is set
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x$DBNAME" == "x" ] || [ "x$DBUNAME" == "x" ] || [ "x$DBDOMAIN" == "x" ]; then
+  Bmsg -rm "Database environment is not set (DBNAME, DBUNAME, DBDOMAIN ...)"
+  Bmsg -rm "Set it with '. dbset <database>' first!"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+out=0
+while true; do
+  case "$1" in
+    -act | --action ) ACTION="$2";act=1; shift 2 ;;
+    -sid | --oracle_sid ) ORACLE_SID="$2";sid=1; shift 2 ;;
+    -sys | --system ) SYSTEM="$2";sys=1; shift 2 ;;
+    -out | --output ) OUTFILE="$2";out=1; shift 2 ;;
+    -h | --help ) usage ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+#    -type | --target_type ) PORT="$2";port=1; shift 2 ;;
+
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the option
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" == "x$sid" ]; then
+  echo ""
+  Bmsg -rm "-sid | --oracle_sid [option] is required"; echo ""; usage
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: any functions
+#-----------------------------------------------------------------------------------------------------------------
+
+function set_lifecycle_and_department()
+{
+MESSAGE="emcli set_target_property_value \\
+      -property_records=\"${TARGET}@${TARGETTYPE}@LifeCycle Status@${LIFECYCLESTATUS}\" \\
+      -property_records=\"${TARGET}@${TARGETTYPE}@Department@${DEPARTMENT}\" \\
+      -subseparator=property_records=\"@\""
+if [ $out -eq 1 ]
+then
+   echo "$MESSAGE" >>$OUTFILE
+fi
+Bmsg -b -m "$MESSAGE"
+echo
+}
+
+function det_agent_port()
+{
+. dbset agent
+emctl status agent >/dev/null
+if [ $? -eq 1 ]
+then
+   Bmsg -r -m "agent is not running!
+cannot determine agent port!"
+   AGT_PORT='<Port>'
+else
+   AGT_PORT=`emctl status agent|grep '^Agent URL'|awk -F: '{print $4}'|awk -F/ '{print $1}'`
+fi
+}
+
+function add_target_listener()
+{
+MESSAGE="emcli $EMCLICMD \\
+          -name=\"${TARGET}\" \\
+          -type=\"${TARGETTYPE}\" \\
+          -host=\"${LONGHOST}\" \\
+          -properties=\"LsnrName=${LISTENERNAME}\" \\
+          -properties=\"ListenerOraDir=${LISTENERADMINDIR}\" \\
+          -properties=\"Port=${LISTENERPORT}\" \\
+          -properties=\"OracleHome=${ORACLEHOME}\" \\
+          -properties=\"Machine=${LONGHOST}\" \\
+          -separator=properties=\"@\" \\
+          -subseparator=properties=\"=\" $ONAGENT"
+if [ $out -eq 1 ]
+then
+   echo "$MESSAGE" >>$OUTFILE
+fi
+Bmsg -b -m "$MESSAGE"
+}
+
+function deploy_agent()
+{
+MESSAGE="emcli $EMCLICMD \\
+          -host_names="${LONGHOST}" \\
+          -platform="226" \\
+          -installation_base_directory="/app/oracle/product/em/agent_13" \\
+          -credential_name="ORACLE-OS-USER-SSHKEY" \\
+          -port="3872" \\
+          -wait_for_completion"
+if [ $out -eq 1 ]
+then
+   echo "$MESSAGE" >>$OUTFILE
+fi
+Bmsg -b -m "$MESSAGE"
+}
+
+function add_target_database()
+{
+MESSAGE="emcli $EMCLICMD \\
+      -name=\"${TARGET}\" \\
+      -type=\"${TARGETTYPE}\" \\
+      -host=\"${LONGHOST}\" \\
+      -credentials=\"UserName:dbsnmp;password:PWD_FILE;Role:${CONNROLE}\" \\
+      -properties=\"SID=${ORACLE_SID_UC}\" \\
+      -properties=\"Port=${LISTENERPORT}\" \\
+      -properties=\"OracleHome=${ORACLEHOME}\" \\
+      -properties=\"MachineName=${LONGHOST}\" \\
+      -separator=properties=\"@\" \\
+      -subseparator=properties=\"=\" \\
+      -input_file=\"PWD_FILE:${EMCLIPWDFILE}\" $ONAGENT"
+if [ $out -eq 1 ]
+then
+   echo "$MESSAGE" >>$OUTFILE
+fi
+Bmsg -b -m "$MESSAGE"
+echo
+}
+
+#function add_target_dbsys()
+#{
+#Bmsg -b -m "emcli $EMCLICMD \\"
+#Bmsg -b -m "      -name=\"${TARGET}\" \\"
+#Bmsg -b -m "      -type=\"${TARGETTYPE}\" \\"
+#Bmsg -b -m "      -host=\"${LONGHOST}\" \\"
+#Bmsg -b -m "      -credentials=\"UserName:dbsnmp;password:PWD_FILE;Role:Normal\" \\"
+#Bmsg -b -m "      -properties=\"SID=${ORACLE_SID_UC}\" \\"
+#Bmsg -b -m "      -properties=\"Port=${LISTENERPORT}\" \\"
+#Bmsg -b -m "      -properties=\"OracleHome=${ORACLEHOME}\" \\"
+#Bmsg -b -m "      -properties=\"MachineName=${LONGHOST}\" \\"
+#Bmsg -b -m "      -separator=properties=\"@\" \\"
+#Bmsg -b -m "      -subseparator=properties=\"=\" \\"
+#Bmsg -b -m "      -input_file=\"PWD_FILE:${EMCLIPWDFILE}\" $ONAGENT"
+#echo
+#}
+
+function delete_target()
+{
+MESSAGE="emcli delete_target \\
+      -name=\"$TARGET\" \\
+      -type=\"$TARGETTYPE\" \\
+      -async"
+#      [-delete_members]"
+if [ $out -eq 1 ]
+then
+   echo "$MESSAGE" >>$OUTFILE
+fi
+Bmsg -b -m "$MESSAGE"
+echo
+}
+
+function delete_target_agent()
+{
+det_agent_port
+MESSAGE="#Please mind!
+#-> This will delete ALL targets monitored by this agent!
+#-> You have to shutdown the agent first.\n"
+if [ $out -eq 1 ]
+then
+   echo "$MESSAGE" >>$OUTFILE
+fi
+Bmsg -r -m "$MESSAGE"
+
+MESSAGE="emcli stop_agent \\
+  -agent_name=\"${LONGHOST}:${AGT_PORT}\" \\
+  -credential_name=ORACLE-OS-USER-SSHKEY"
+if [ $out -eq 1 ]
+then
+   echo "$MESSAGE" >>$OUTFILE
+fi
+Bmsg -b -m "$MESSAGE"
+
+MESSAGE="emcli delete_target \\
+      -name=\"$LONGHOST:$AGT_PORT\" \\
+      -type=\"oracle_emd\" \\
+      -delete_monitored_targets \\
+      -async"
+if [ $out -eq 1 ]
+then
+   echo "$MESSAGE" >>$OUTFILE
+fi
+Bmsg -b -m "$MESSAGE"
+
+if [ "$AGT_PORT" == '<Port>' ]
+then
+   MESSAGE="#To get the agent port use this:
+#emcli get_targets -targets=%:oracle_emd|grep -e \"$LONGHOST\""
+   if [ $out -eq 1 ]
+   then
+      echo "$MESSAGE" >>$OUTFILE
+   fi
+   Bmsg -b -m "$MESSAGE"
+fi
+
+echo
+}
+#-----------------------------------------------------------------------------------------------------------------
+#     Set Environment
+#-----------------------------------------------------------------------------------------------------------------
+ACTION_UC=`echo $ACTION|tr 'a-z' 'A-Z'`
+ORACLE_SID_UC=`echo $ORACLE_SID|tr 'a-z' 'A-Z'`
+ORACLEHOME=`grep "^${ORACLE_SID_UC}" /etc/oratab|awk -F ":" ' { print $2 }'`
+#LISTENERNAME="LISTENER_${ORACLE_SID_UC}"
+#LISTENERTARGET="LISTENER_${ORACLE_SID_UC}_${LONGHOST}"
+LISTENERNAME="LISTENER_${DBNAME}"
+LISTENERTARGET="LISTENER_${DBNAME}_${LONGHOST}"
+LISTENERPORT=`$ORACLEHOME/bin/lsnrctl status $LISTENERNAME|grep "Connecting to"|grep -o "PORT[[:blank:]]*=[[:blank:]]*[0-9]*"|grep -o "[0-9]*"`
+LISTENERADMINDIR="$ORACLEHOME/network/admin"
+#DATABASETARGET="${ORACLE_SID_UC}_${LONGHOST}"
+#DBSYSTEMTARGET="${ORACLE_SID_UC}_${LONGHOST}_sys"
+DATABASETARGET="${DBUNAME}.${DBDOMAIN}"
+DBSYSTEMTARGET="${DATABASETARGET}_sys"
+AGENTTARGET="${LONGHOST}:3872"
+#PWDFILE=$PWDDIR/.emcli_pwdfile
+
+if [ "$DBNAME" != "$DBUNAME" ]; then
+  CONNROLE=SYSDBA
+else
+  CONNROLE=Normal
+fi
+
+if [ "$ACTION_UC" == "SET" ] || [ "$ACTION_UC" == "ADD" ]; then
+case "$SYSTEM" in
+  P | p ) LIFECYCLESTATUS="Production" ;;
+  I | i ) LIFECYCLESTATUS="Stage" ;;
+  F | f | K | k | E | e ) LIFECYCLESTATUS="Development" ;;
+  Z | z ) LIFECYCLESTATUS="Test" ;;
+  * ) exit 100;;
+esac
+fi
+DEPARTMENT="Standard"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptstart "${SCRIPTNAME} - ${SCRIPTSHORTDESC}"
+
+if [ $out -eq 1 ]
+then
+   OUTDIR=`dirname $OUTFILE`
+   if [ ! -d $OUTDIR ]
+   then
+      Bmsg -b -m "directory >$OUTDIR< does not exist"
+      mkdir -p $OUTDIR
+      if [ $? -ne 0 ]
+      then
+         Bmsg -r -m "directory could not be created!"
+         Bmsg -r -m "output only to terminal not in file!!!!"
+      fi
+   fi
+fi
+Bmsg -g -m "Execute next commands ..."
+Bmsg -b -m "ssh $OMSSERVER"
+Bmsg -b -m "sudo su - oracle"
+Bmsg -b -m ". dbset oms"
+Bmsg -b -m "emcli login -username=sysman"
+Bmsg -b -m "emcli sync"
+if [ $out -eq 1 ]
+then
+   echo "emcli login -username=sysman" >$OUTFILE
+   echo "emcli sync" >>$OUTFILE
+fi
+Bmsg -m "<execute commands listed below>"
+Bmsg -b -m "emcli sync"
+Bmsg -b -m "emcli logout\n"
+
+if [ "$ACTION_UC" == "ADD" ]; then
+  EMCLICMD=submit_add_host
+  Bmsg -g -m "### deploy agent ###"
+  deploy_agent
+
+  EMCLICMD=add_target
+  ONAGENT=""
+  
+  Bmsg -g -m "### Database Instance ###"
+  TARGETTYPE="oracle_database"; TARGET=$DATABASETARGET
+  add_target_database
+  set_lifecycle_and_department
+
+#  Bmsg -g -m "### Database System ###"
+#  TARGET_TYPE="oracle_dbsys"; TARGET=$DBSYSTEMTARGET
+#  set_lifecycle_and_department
+
+  Bmsg -g -m "### Listener ###"
+  TARGETTYPE="oracle_listener"; TARGET=$LISTENERTARGET
+  add_target_listener
+  set_lifecycle_and_department
+
+  Bmsg -g -m "### Agent and Host ###"
+  Bmsg -r -m "ATTENTION: Please check actual values first!"
+  Bmsg -r -m "Agents and host could be configured with higher values already."
+  TARGETTYPE="oracle_emd"; TARGET=$AGENTTARGET
+  set_lifecycle_and_department
+  TARGETTYPE="host"; TARGET=$LONGHOST
+  set_lifecycle_and_department
+fi
+
+if [ "$ACTION_UC" == "MOD" ]; then
+  EMCLICMD=modify_target 
+  ONAGENT="-on_agent"
+
+  Bmsg -g -m "### Database Instance ###"
+  TARGETTYPE="oracle_database"; TARGET=$DATABASETARGET
+  add_target_database
+
+  Bmsg -g -m "### Listener ###"
+  TARGETTYPE="oracle_listener"; TARGET=$LISTENERTARGET
+  add_target_listener
+fi
+
+if [ "$ACTION_UC" == "DEL" ]; then
+  Bmsg -g -m "### Database ###"
+  TARGETTYPE="oracle_database"; TARGET=$DATABASETARGET
+  delete_target 
+
+  Bmsg -g -m "### Listener ###"
+  TARGETTYPE="oracle_listener"; TARGET=$LISTENERTARGET
+  delete_target
+
+  Bmsg -g -m "### Agent and Host ###"
+  delete_target_agent
+fi
+
+if [ "$ACTION_UC" == "SET" ]; then
+  TARGETTYPE="oracle_database"; TARGET=$DATABASETARGET
+  Bmsg -g -m "### Database ###"
+  set_lifecycle_and_department
+  
+#  Bmsg -g -m "### Database System###"
+#  TARGET_TYPE="oracle_dbsys"; TARGET=$DBSYSTEMTARGET
+#  Bmsg -g -m "### Database System ###"
+#  set_lifecycle_and_department
+
+  TARGETTYPE="oracle_listener"; TARGET=$LISTENERTARGET
+  Bmsg -g -m "### Listener ###"
+  set_lifecycle_and_department
+  
+  Bmsg -g -m "### Agent and Host ###"
+  Bmsg -r -m "ATTENTION: Please check actual values first!"
+  Bmsg -r -m "Agents and host could be configured with higher values already."
+  TARGETTYPE="oracle_emd"; TARGET=$AGENTTARGET
+  set_lifecycle_and_department
+  TARGETTYPE="host"; TARGET=$LONGHOST
+  set_lifecycle_and_department
+fi
+echo
+
+if [ $out -eq 1 ]
+then
+   echo "emcli sync" >>$OUTFILE
+   echo "emcli logout" >>$OUTFILE
+fi
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptend 
+exit

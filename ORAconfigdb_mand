@@ -1,0 +1,265 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#)  File        : ORAconfigdb_mand
+# @(#)  Author      : Marcel Pils
+# @(#)  Modified    :
+# @(#)
+# @(#)  Description : This is a mandatory Oracle database configuration script.
+# @(#)                It implements some Barmenia configuration standards for Oracle databases.
+# @(#)
+# @(#)  Version     : 1.13
+# @(#)  Date        : 18.03.2024
+# @(#)
+# @(#)  Attention   : This script must be started as user ORACLE!
+# @(#)                Executet SQL scripts must not use any "set ..." sqlplus commands!
+# @(#)
+# @@(#) Change History:
+# @@(#)
+# @@(#)   1.0   2013-05-02  Pils                            Created
+# @@(#)
+# @@(#)   1.1   2016-06-15  Thiel    bei der Vergabe der Datenbankrechte fuer den User PAOMON
+# @@(#)                              wird ein zusaetzliches Skript 3_grant_special_rights.sql aufgerufen
+# @@(#)   1.2   2018-01-25  Pils     changed pwddir location
+# @@(#)   1.3   2018-06-16  Pils     Added a check vor existing -sid value
+# @@(#)   1.4   2018-03-07  Smets    Aenderungen / Anpassungen an Auditing Implementierung
+# @@(#)   1.6   2018-09-24  Smets    Hinzufuegen Procedure "CHECK_SPERRORLOG"
+# @@(#)   1.7   20.03.2019  Thiel    Optimizer Fix Controls einrichten
+# @@(#)   1.7.1             Thiel    invoke sqlplus with preceding path
+# @@(#)   1.8   27.03.2019  Thiel    Optimizer Fix Controls werden in ORAdeploy eingerichtet
+# @@(#)   1.9   07.11.2019  Smets    Added PWD for BVBTDUSR
+# @@(#)   1.10  17.12.2020  Smets    Neue File Execution fuer neue Procedure
+# @@(#)   1.11  28.03.2023  Smets    Anlage Schema BV$CMDB mit DBLINK zu DBAP und View ORA_PRODCOPY_PACKAGES
+# @@(#)   1.12  13.07.2023  Smets    User BVBTDUSR wird in eigenem SQL-File angelegt, da je File nur 1 Parameter übergebenwerden kann (Password)
+# @@(#)   1.13  18.03.2024  Smets    Akt. Verify Passowrd Function incl. Profiles (TADBA-6108) 
+# @(#) ================================================================================================================
+#set -x
+set +x      #needed to hide passwords in shell variables from "set -x" bash execution (e.g. ControlM Logfile)
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+#MAILTO="unix-dba@barmenia.de"
+#HOST=`hostname -s`
+#LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Configures mandatory Barmenia database standards"
+ORACLE_BASE="/app/oracle"
+LOGDIR="/app/logs"
+LOGFILE="${LOGDIR}/${SCRIPTNAME}_`date +%Y%m%d%H%M%S%N`.log"
+BINDIR="/app/oracle/bin"
+
+source $BINDIR/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+ echo ".bash_functions file not found!"
+ exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : $SCRIPTNAME -sid <database name>"
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters  : -sid,                     Database Name"
+echo "                -h,                       help screen"
+echo ""
+echo "  Example     : $SCRIPTNAME -sid ORATST"
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+echo ""
+exit 1
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: SQL script execution
+#-----------------------------------------------------------------------------------------------------------------
+function runsqlscript()
+{
+SQLSCRIPT=$1
+SQLPARAMS=$2
+Bmsg -l $LOGFILE -m "running ${SQLSCRIPT} .."
+$ORACLE_HOME/bin/sqlplus / as sysdba <<EOSQL >> $LOGFILE 2>&1
+set echo on verify off time on 
+--whenever oserror ....
+@${SQLSCRIPT} ${SQLPARAMS}
+exit
+EOSQL
+RC=$?
+if [ $RC -ne 0 ]; then
+  Bmsg -rl $LOGFILE -m "Error in sql script (error code ${RC}!"
+  Bmsg -rl $LOGFILE -m "Check logfile $LOGFILE"
+else
+  Bmsg -gl $LOGFILE -m "SQL script finished successfully."
+fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort   
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  Bmsg -rm "Script may not run as user `id -un`, it must be started and run as oracle"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if ORACLE_HOME is set
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" = "x${ORACLE_HOME}" ]; then
+  Bmsg -rm "ORACLE_HOME not set. It must be set first!"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+#echo pre-params
+while true; do
+  case "$1" in
+    -sid | --oracle_sid ) ORACLE_SID="$2";sid=1; 
+           if [ "x" == "x$ORACLE_SID" ]; then Bmsg -rm "No value defined for option '-sid'"; echo ""; usage; fi;
+           shift 2 ;;
+    -h | --help ) usage ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+#echo post-params
+
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the option
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" == "x$sid" ]; then
+  Bmsg -rm "-sid | --oracle_sid [option] is required"; echo ""; usage
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Set Environment
+#-----------------------------------------------------------------------------------------------------------------
+ORACLE_SID_LC=`echo $ORACLE_SID|tr 'A-Z' 'a-z'`
+ORACLE_SID_UC=`echo $ORACLE_SID|tr 'a-z' 'A-Z'`
+OWNER="oracle"
+GROUP="oinstall"
+ORANFSDIR="/oranfs/share/ora_admin/SYSTEM"
+ACTUALDIR=$PWD
+PWDDIR="/app/oracle/admin/etc/pwddir"
+source $PWDDIR/.pwdfile_db_pwdadm
+source $PWDDIR/.pwdfile_db_bvbtcusr
+source $PWDDIR/.pwdfile_db_bvbtdusr
+source $PWDDIR/.pwdfile_db_revision
+source $PWDDIR/.pwdfile_db_sysmgmnt
+source $PWDDIR/.pwdfile_db_bvent
+source $PWDDIR/.pwdfile_db_bvaud
+source $PWDDIR/.pwdfile_db_paomon
+# V 1.11  28.03.2023
+source $PWDDIR/.pwdfile_db_bvcmdb
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptstart -l $LOGFILE "${SCRIPTNAME} - ${SCRIPTSHORTDESC}"
+
+##### Some DB Configurations #######
+export ORACLE_SID=${ORACLE_SID_UC}
+
+
+Bmsg -1l $LOGFILE -m "Step: aktivieren PWD Management"
+#cd $ORANFSDIR/1_pwdacc
+#runsqlscript "_create.sql"
+#runsqlscript "_enable_pwd_mgmt.sql"
+#runsqlscript "_create_setpwd.sql" "$PWDPWDADM"
+cd $ORANFSDIR/1_profiles
+runsqlscript "1_bv_verify_pwd.sql"
+runsqlscript "2_bv_profiles.sql"
+
+Bmsg -1l $LOGFILE -m "Step: Anlegen Rollen, BV$DBA, Berechtigungen"
+cd $ORANFSDIR/2_privs
+runsqlscript "1_Role_bv#connect.sql"
+runsqlscript "1_Role_bv#resource.sql"
+runsqlscript "1_Role_bv#dba.sql"
+runsqlscript "2_BVDBA.sql" "$PWDBVBTCUSR"
+# V 1.12  13.07.2023
+runsqlscript "2_BVBTDUSR.sql" "$PWDBVBTDUSR"
+# V 1.11  28.03.2023
+runsqlscript "3_BVCMDB.sql" "$PWDBVCMDB"
+
+Bmsg -1l $LOGFILE -m "Step: Anlegen Rollen, BV$DBA, Berechtigungen"
+cd $ORANFSDIR/3_procs
+runsqlscript "priv_disable_enable.sql"
+runsqlscript "priv_truncate_table.sql"
+runsqlscript "cnstrnts_cntl.sql"
+runsqlscript "cnstrnts_all_off.sql"
+runsqlscript "cnstrnts_all_on.sql"
+runsqlscript "cnstrnts_pr_trg_off.sql"
+runsqlscript "cnstrnts_pr_trg_on.sql"
+runsqlscript "cnstrnts_xchk_off.sql"
+runsqlscript "cnstrnts_xchk_on.sql"
+runsqlscript "gather_tbl_stats.sql"
+runsqlscript "grant_2_stdrole_ro.sql"
+runsqlscript "grant_2_stdrole_rw.sql"
+runsqlscript "create_synonym.sql"
+runsqlscript "indx_all_off.sql"
+runsqlscript "indx_all_on.sql"
+runsqlscript "sequence_set.sql"
+runsqlscript "sequence_reset.sql"
+runsqlscript "truncate_table.sql"
+runsqlscript "truncate_synonym.sql"
+runsqlscript "startservices.sql"
+runsqlscript "ora_pwd.sql"
+runsqlscript "check_sperrorlog.sql"
+
+Bmsg -1l $LOGFILE -m "Step: Anlegen SchemaSave Package"
+cd $ORANFSDIR/3_procs/schema_save
+runsqlscript "1_create_user.sql" "$PWDBVENT"
+runsqlscript "2_schema_save.pkg"
+
+Bmsg -1l $LOGFILE -m "Step: Anlegen User, Rolle fuer Revision"
+cd $ORANFSDIR/4_revision
+runsqlscript "revision.def" "$PWDREVISION"
+
+Bmsg -1l $LOGFILE -m "Step: Anlegen User, Rolle fuer Application Monitoring"
+cd $ORANFSDIR/5_sysmgmnt
+runsqlscript "1_sysmgmnt.def" "$PWDSYSMGMNT"
+
+Bmsg -1l $LOGFILE -m "Step: Anlegen User, Rolle fuer Foglight-Monitoring"
+cd $ORANFSDIR/6_allg_monitoring
+runsqlscript "1_paomon.def" "$PWDPAOMON"
+runsqlscript "2_grant_rights.sql" "PAOMON"
+runsqlscript "3_grant_special_rights.sql"
+
+Bmsg -1l $LOGFILE -m "Step: Anlegen Directories (z.B. für Exports to /oranfs/share)"
+cd $ORANFSDIR/7_directories
+runsqlscript "1_export_dirs.def"
+
+Bmsg -1l $LOGFILE -m "Step: Einrichten Auditing und OUD"
+cd $ORANFSDIR/8_AuditingAndOUD
+runsqlscript "00_function_get_email_address.sql"
+runsqlscript "01_oud_init_ekfip.sql"
+runsqlscript "10_Pol_bv#NOAUDIT.sql"
+runsqlscript "11_Pol_bv#logon.sql"
+runsqlscript "12_Pol_bv#minimumaudit.sql"
+runsqlscript "13_Pol_bv#allddlaudit.sql"
+runsqlscript "14_Pol_bv#dmlaudit.sql"
+runsqlscript "20_drop_bvaud_user.sql"
+runsqlscript "21_create_bv_auditing.sql" "$PWDBVAUD"
+runsqlscript "40_audit_cleanup_proc.sql"
+runsqlscript "41_audit_user_logins_proc.sql"
+runsqlscript "42_audit_user_dml_proc.sql"
+runsqlscript "43_audit_tech_user_logins_proc.sql"
+runsqlscript "44_audit_last_user_logins_proc.sql"
+runsqlscript "45_audit_appl_user_logins_proc.sql"
+
+cd $ACTUALDIR
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+
+Bscriptend -l $LOGFILE
+exit

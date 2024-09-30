@@ -1,0 +1,993 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#) File        : ORAstandby
+# @(#) Author      : Johannes Ahrends
+# @(#)
+# @(#) Version     : 0.18
+# @(#) Date        : 09.04.2024
+# @(#)
+# @(#) Description : Setup Dataguard database from existing database
+# @(#)
+# @(#) Syntax      : see usage (ORAstandby -h)
+# @(#)
+# @(#) Attention   : This script must be started as user ORACLE on the Standby Server
+# @(#)
+# @(#) Presumption :
+# @(#) 1. for ssh connects a position of trust is needed between the two machines
+# @(#) 2. Oracle software is installed, database exists in /etc/oratab
+# @(#) 3. Passwordless ssh connect to primary database possible
+# @(#) 4. ORACLE_HOME identical on primary and standby
+# @(#) 5. ORACLE_SID identical on primary and standby
+#
+# @@(#) Change History:
+# @@(#)
+# @@(#) 0.1     08.12.2015 J. Ahrends basic script as copy from ORAduplicate_db.sh
+# @@(#) 0.2     15.12.2015 J. Ahrends include ORApreparestandby
+# @@(#) 0.3     05.01.2016 J. Ahrends Parameter changes
+# @@(#) 0.4     19.01.2016 J. Ahrends Changes for new structure
+# @@(#) 0.5     26.01.2016 J. Ahrends Dataguard Broker, RMAN config, Flashback
+# @@(#) 0.6     09.02.2016 J. Ahrends Changes to parameters (-t Option added)
+# @@(#) 0.7     18.03.2016 Th. Thiel  proof existence of environment variable ORACLE_SID
+# @@(#) 0.8     22.03.2016 J. Ahrends derive DBNAME from ORACLE_SID, exit after fatal error, Remove option -t
+# @@(#) 0.9     05.04.2016 J. Ahrends RMAN SBT Device settings (NBORACLIENT)
+# @@(#) 0.10    05.04.2016 J. Ahrends run ORArman -s, Mail to Netbackup Colleagues
+# @@(#) 0.11    20.04.2016 J. Ahrends make mail an option (-m)
+# @@(#) 0.12    25.05.2016 Th. Thiel  NBU-Appliance uses new NB_ORA_SCHED=Database_2w
+# @@(#) 0.13    15.06.2016 v. Wirth   - Einrichten der HUGE-Pages analog ORAdeploy
+# @@(#)                               - Mail an CTM-Admins wegen Einrichtung einer Hostgroup
+# @@(#)                               - Datensatz in AJC_DATA erstellen
+# @@(#) 0.14    06.07.2016 Th. Thiel  changed option -po to optional, it used to be mandatory
+# @@(#)                               if omitted will use port 1601
+# @@(#) 0.15    11.09.2016 M. Pils    Parameter "ps - PrimarySide" hinzugefuehgt. Nun kann auch aus einer
+# @@(#)                               S2 Seite als Primary Instance eine S1 Standby erstellt werden.
+# @@(#) 0.16    25.10.2018 M. Pils    changed pwddir location
+# @@(#) 0.17    09.06.2021 J. Ahrends Changed Parameter for df Command (was $2 should be $3)
+# @@(#) 0.18    09.04.2024 M. Pils    Added "" for Oracle Password
+# @(#) ================================================================================================================
+#
+# Variables
+#
+SCRIPTDIR=/app/oracle/bin
+PWDDIR=/app/oracle/admin/etc/pwddir
+DIR=$SCRIPTDIR
+LOCKFILE=$DIR/ORAstandby_db.lck
+DATE=`date +%Y-%m-%d-%H-%M-%S`
+RT=0
+RMANCMD=rmandup.rcv
+DBNAME=$ORACLE_SID
+cd $DIR
+ADMINDIR=/app/oracle/admin/$DBNAME
+NBUMAILTO="hubertus.wiegard@barmenia.de,guenter.pahlke@barmenia.de"
+CTMMAILTO="Dezentrale-Produktion@barmenia.de"
+#NBUMAILTO="johannes.ahrends@barmenia.de"
+MAILTO="unix-dba@barmenia.de"
+#MAILTO="johannes.ahrends@barmenia.de"
+#
+PRIMARYSIDE="S1"
+DBDEL=0
+BLACKOUT=0
+PREPRIMARY=0
+PRESTANDBY=0
+MAIL=0
+#-----------------------------------------------------------------------
+#
+#Functions
+#
+#-----------------------------------------------------------------------
+#
+#-----------------------------------------------------------------------
+# Usage help
+#-----------------------------------------------------------------------
+#
+usage() {
+   echo " "
+   echo "Function:  Create standby database from primary database"
+   echo " "
+   echo "     Usage:  `basename $0` -p <primaryhostname> -po <port> [-n] [-s] [-d] [-b]"
+   echo "        -p:  Primary Hostname (full qualified)"
+   echo "       -ps:  Primary Side (optional! default=S1)"
+   echo "       -po:  Listener Port (optional! default=1601)"
+   echo "        -s:  New Installation (create directories and Oracle net Files)"
+   echo "        -n:  Prepare primary Database (e.g. create Standby Redo logs"
+   echo "        -b:  set Blackout"
+   echo "        -d:  delete Database (Default: expect database does not exist) (Does not work on Production Databases)"
+   echo "        -m:  Send Mail to NetBackup- and CTRL-M - Admins"
+   echo "        -h:  this help"
+   echo " "
+   echo " Example: $0 -p lx3g6.barmenia.lan -po 1661 -d -b"
+   echo "          $0 -p lx2u1.barmenia.lan -po 1661 -ps S2 -s -n"
+}
+#
+#-----------------------------------------------------------------------
+# Logger Script
+#-----------------------------------------------------------------------
+#
+logger() {
+if [ -r $SCRIPTDIR/log4sh ]
+then
+   LOCALLOGGER="`basename $0 | cut -d"." -f 1`_log4sh.properties"
+   if [ -r $SCRIPTDIR/${LOCALLOGGER} ]
+   then
+      LOG4SH_CONFIGURATION=$SCRIPTDIR/$LOCALLOGGER . $SCRIPTDIR/log4sh
+   else
+      LOG4SH_CONFIGURATION=$SCRIPTDIR/log4sh.properties . $SCRIPTDIR/log4sh
+   fi
+else
+   echo "ERROR: could not load (log4sh)" >&2
+   exit 1
+fi
+#  echo "LOG4SH_CONFIGURATION:$LOG4SH_CONFIGURATION"
+}
+#
+#-----------------------------------------------------------------------
+# Read password from hidden file
+#-----------------------------------------------------------------------
+#
+readPWD() {
+   logger_debug "get SYS Password"
+   if [ -f $PWDDIR/.pwdfile_db_sys ]
+   then
+      typeset -l ORACLE_SID_LC=$PRIMARYDB
+      source $PWDDIR/.pwdfile_db_sys
+      sysPW=$PWDSYS
+      source $PWDDIR/.pwdfile_db_bvajc
+   else
+      logger_error "No Passwordfile"
+      exit 10
+   fi
+}
+#
+#-----------------------------------------------------------------------
+# Check if Filesystems on Standby are empty
+#-----------------------------------------------------------------------
+#
+checkSize() {
+   DATAUSED=`df -m | grep ${STANDBYDBUNAME} | grep data | awk '{ print $3 }'`
+   logger_debug "Data = ${DATAUSED} MB"
+   FRAUSED=`df -m | grep ${STANDBYDBUNAME} | grep fra | awk '{ print $3 }'`
+   logger_debug "FRA)  = ${FRAUSED} MB"
+   if [ $DATAUSED -gt 100 -o $FRAUSED -gt 100 ]
+   then
+      logger_error "Data or FRA Filesystem not empty, cleanup needed!"
+      logger_error "Data = ${DATAUSED} MB"
+      logger_error "FRA  = ${FRAUSED} MB"
+      logger_error "Maximum Used = 100 MB"
+      exit 21
+   fi
+}
+
+#
+#-----------------------------------------------------------------------
+# Delete Database
+#   --> Remove Dataguard Configuration
+#   --> Set parameter dg_broker_start = FALSE
+#   --> Drop Database
+#   --> Check that database has been dropped
+#-----------------------------------------------------------------------
+#
+deleteDB() {
+   logger_info "Delete Database"
+   if [ `echo $ORACLE_SID|rev|cut -c1` == 'P' ]
+   then
+      logger_error "Cannot Delete P-Database, not allowed!"
+      exit 2
+   fi
+#
+# delete dataguard broker configuration
+#
+   dgmgrl sys/${sysPW} <<EODG
+      DISABLE CONFIGURATION;
+      REMOVE CONFIGURATION;
+EODG
+   COMMAND=$(dgmgrl sys/${sysPW} <<EODG
+      show configuration;
+EODG
+)
+   logger_debug "COMMAND=$COMMAND"
+   if [ `echo $COMMAND | grep -c ORA-16532` -eq 1 ]
+   then
+      logger_info "Dataguard configuration removed"
+   else
+      logger_warn "Unable to remove Dataguard configuration"
+   fi
+#
+#  Set dg_broker_start Parameter = FALSE
+#
+
+   logger_debug "Reset dg_broker_start and log_archive_dest"
+   sqlplus /nolog <<EOSQL
+      connect sys/"${sysPW}"@${PRIMARYDBUNAME} as sysdba
+      ALTER SYSTEM SET dg_broker_start=FALSE;
+      ALTER SYSTEM SET log_archive_dest_2='';
+EOSQL
+#
+# DROP DATABASE
+#
+   logger_debug "Drop Database ${ORACLE_SID}"
+
+   COMMAND=$(sqlplus -s / as sysdba <<EOSQL
+      WHENEVER SQLERROR EXIT SQL.SQLCODE
+      shutdown abort
+      startup mount
+      ALTER SYSTEM ENABLE RESTRICTED SESSION;
+      DROP DATABASE;
+EOSQL
+)
+#
+# Check that database has been dropped
+#
+   logger_debug "COMMAND=${COMMAND}"
+   if [ $VERSION -eq 12 ]
+   then
+      if [ "`echo $COMMAND |grep -c "Database dropped"`" -ne 1 ]
+      then
+         logger_error "Unable to drop Database"
+         logger_error "$COMMAND"
+         exit 3
+      else
+         logger_info "Drop Database successful"
+      fi
+   else
+      if [ "`echo $COMMAND |grep -c "ORA-01034: ORACLE not available"`" -ne 1 ]
+      then
+         logger_error "Unable to drop Database"
+         logger_error "$COMMAND"
+         exit 3
+      else
+         logger_info "Drop Database successful"
+      fi
+   fi
+}
+#
+#-----------------------------------------------------------------------
+# Check RMAN connect to primary database
+#-----------------------------------------------------------------------
+#
+checkRMAN () {
+   logger_info "Test connection"
+   RMANCONNECT="connect target 'sys/${sysPW}@${PRIMARYDBUNAME}'"
+   LOCALCONNECT="connect auxiliary 'sys/${sysPW}@${STANDBYDBUNAME}'"
+
+   CONNECT=$(rman <<EORMAN
+   $RMANCONNECT
+EORMAN
+)
+   logger_debug "$CONNECT"
+   if [ `echo $CONNECT | grep -c "connected to target database:"` -eq 1 ]
+   then
+      logger_debug "RMAN Test Connection successful"
+   else
+      logger_error "Connect to Database $PRIMARYDBUNAME failed"
+      exit 11
+   fi
+}
+
+#
+#-----------------------------------------------------------------------
+# Start database with dummy spfile
+#-----------------------------------------------------------------------
+#
+startInstance() {
+
+   logger_info "Start Dummy Instance"
+   EXISTS=$(sqlplus -s / as sysdba <<EOSQL
+      SELECT open_mode FROM v\$database;
+EOSQL
+)
+   logger_debug "${EXISTS}"
+   if [ `echo $EXISTS |grep -c ORA-01034` -ne 1 ]
+   then
+      logger_error "Instance still running"
+      logger_error "Please shutdown instance first"
+      exit 11
+EOSQL
+   fi
+   COMMAND=$(sqlplus -s / as sysdba <<EOSQL
+      startup nomount pfile='${ADMINDIR}/pfile/init${DBNAME}_dup.ora';
+      exit;
+EOSQL
+)
+   logger_debug "COMMAND=${COMMAND}"
+
+   if [ `echo $COMMAND | grep -c "instance started"` -ne 1 ]
+   then
+      logger_error "$RETURNSTRING"
+      exit 3
+   else
+      logger_info "Instance started"
+   fi
+}
+#
+#-----------------------------------------------------------------------
+# Duplicate Database with RMAN
+#-----------------------------------------------------------------------
+#
+duplicateDB() {
+#
+#  due to occational occuring error 17628 and 19505 precreation of
+#  controlfile directories is useful
+#
+   mkdir -p /app/oracle/data/${STANDBYDBUNAME}/controlfile
+   mkdir -p /app/oracle/fra/${STANDBYDBUNAME}/controlfile
+#
+   logger_info "Starting RMAN Duplication"
+   cat <<EOCAT >${RMANCMD}
+   $LOCALCONNECT
+   $RMANCONNECT
+   run {
+      allocate channel prmy1 type disk;
+      allocate channel prmy2 type disk;
+      allocate auxiliary channel stby1 type disk;
+      allocate auxiliary channel stby2 type disk;
+      DUPLICATE TARGET DATABASE
+        FOR STANDBY
+        FROM ACTIVE DATABASE
+        DORECOVER
+        SPFILE
+        PARAMETER_VALUE_CONVERT '${PRIMARYDBUNAME}','${STANDBYDBUNAME}'
+        SET "db_unique_name"="${STANDBYDBUNAME}"
+        NOFILENAMECHECK;
+   }
+EOCAT
+   rman cmdfile=$RMANCMD > /tmp/${RMANCMD}.log 2>&1
+   cat /tmp/${RMANCMD}.log |logger_debug
+   if [ `grep ORA- ${RMANCMD}.log | grep -v ORA-38757| wc -l` -eq 0 ]
+   then
+      logger_info "Database duplication successful"
+   else
+      logger_error "Unable to duplicate datababase $RT"
+      exit 10
+   fi
+   rm /tmp/${RMANCMD}.log
+}
+#
+#-----------------------------------------------------------------------
+# Create Dataguard Broker Configuration
+#   --> Set Parameter dg_broker_start=TRUE for both databases
+#   --> Create Dataguard Broker Configuration
+#   --> Verify Configuration
+#-----------------------------------------------------------------------
+#
+createDGBroker()
+{
+   logger_info "Create Dataguard Broker Configuration"
+#
+# Set Parameter dg_broker_start=TRUE for both databases
+#
+   sqlplus /nolog <<EOSQL
+      CONNECT sys/${sysPW}@${PRIMARYDBUNAME} AS sysdba
+      ALTER SYSTEM SET dg_broker_start=TRUE;
+EOSQL
+
+   sqlplus /nolog <<EOSQL
+      CONNECT sys/"${sysPW}"@${STANDBYDBUNAME} AS sysdba
+      ALTER SYSTEM SET dg_broker_start=TRUE;
+EOSQL
+#
+   sleep 60
+   dgmgrl sys/"${sysPW}"@${PRIMARYDBUNAME} <<EODG >/tmp/dgmgrl.log 2>&1
+   CREATE CONFIGURATION '${DBNAME}_DG' AS
+      PRIMARY DATABASE IS '${PRIMARYDBUNAME}'
+      CONNECT IDENTIFIER IS '${PRIMARYDBUNAME}';
+   ADD DATABASE '${STANDBYDBUNAME}' AS
+      CONNECT IDENTIFIER IS '${STANDBYDBUNAME}'
+      MAINTAINED AS PHYSICAL;
+   EDIT DATABASE '${PRIMARYDBUNAME}' SET PROPERTY StandbyFileManagement='AUTO';
+   EDIT DATABASE '${STANDBYDBUNAME}' SET PROPERTY StandbyFileManagement='AUTO';
+   EDIT DATABASE '${PRIMARYDBUNAME}' SET PROPERTY 'NetTimeout'=60;
+   EDIT DATABASE '${STANDBYDBUNAME}' SET PROPERTY 'NetTimeout'=60;
+   EDIT DATABASE '${PRIMARYDBUNAME}' SET PROPERTY 'LogXptMode'='SYNC';
+   EDIT DATABASE '${STANDBYDBUNAME}' SET PROPERTY 'LogXptMode'='SYNC';
+   EDIT DATABASE '${PRIMARYDBUNAME}' SET PROPERTY dbDisplayName = '${PRIMARYDBUNAME}.unix.lan';
+   EDIT DATABASE '${STANDBYDBUNAME}' SET PROPERTY dbDisplayName = '${STANDBYDBUNAME}.unix.lan';
+   EDIT CONFIGURATION SET PROTECTION MODE AS MAXAVAILABILITY;
+   ENABLE CONFIGURATION;
+EODG
+   cat /tmp/dgmgrl.log | logger_debug
+   rm /tmp/dgmgrl.log
+#
+# Verify configuration
+#
+   logger_debug "Verify Configuration"
+   RT=$(dgmgrl / <<EOVER
+   show configuration
+EOVER
+)
+   logger_debug "RT=$RT"
+   if [ `echo $RT| grep -c SUCCESSFUL` -ne 0 ]
+   then
+      logger_error "Dataguard Configuration not successful"
+      logger_error "$RT"
+      exit 21
+   else
+      logger_info "Dataguard configuration successful"
+   fi
+}
+#
+#-----------------------------------------------------------------------
+# Enable Flashback Database
+#    --> Stop Apply Process
+#    --> ALTER DATABASE flashback on
+#    --> Start Apply Process
+#-----------------------------------------------------------------------
+#
+enableFlashback()
+{
+   logger_info "Enable Flashback Database"
+
+   logger_debug "Stop Apply Process"
+   dgmgrl / <<EODG1
+      EDIT DATABASE '$STANDBYDBUNAME' SET STATE = 'APPLY-OFF';
+EODG1
+
+   logger_debug "Enable Flashback Database"
+   sqlplus -s / as sysdba <<EOSQL
+ALTER DATABASE FLASHBACK ON;
+EOSQL
+
+   logger_debug "Start Apply Process"
+   dgmgrl / <<EODG1
+      EDIT DATABASE '$STANDBYDBUNAME' SET STATE = 'APPLY-ON';
+EODG1
+
+   FLASHSTATE=$(sqlplus -s / as sysdba <<EOSTATE
+   SELECT flashback_on FROM v\$database;
+EOSTATE
+)
+   logger_debug "FLASHSTATE = "$FLASHSTATE
+   if [ `echo $FLASHSTATE | grep -c YES` -lt 1 ]
+   then
+      logger_warn "Database not in Flashback mode --> $FLASHSTATE"
+   else
+      logger_info "Enable Flashback Database successful"
+   fi
+}
+#-----------------------------------------------------------------------
+#
+# Register Database in Recovery Catalog
+#
+#-----------------------------------------------------------------------
+rmanconfigureDB() {
+   logger_info "Start configuration for Standby Database in RMAN Catalog"
+   cat <<EORMAN >${RMANCMD}
+CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 30 DAYS;
+CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY BACKED UP 1 TIMES TO 'SBT_TAPE';
+CONFIGURE DB_UNIQUE_NAME $PRIMARYDBUNAME CONNECT IDENTIFIER '$PRIMARYDBUNAME';
+CONFIGURE DB_UNIQUE_NAME $STANDBYDBUNAME CONNECT IDENTIFIER '$STANDBYDBUNAME';
+EORMAN
+   cat ${RMANCMD} | logger_debug
+   RT=$(rman target sys/$sysPW@${PRIMARYDBUNAME} catalog rman/rman@rcvcat cmdfile=$RMANCMD | logger_debug; echo $? )
+   logger_debug "Configure Database ReturnCode=$RT"
+   if [ $RT -ne 0 ]
+   then
+      logger_error "RMAN configuration for Standby Database failed Returncode=$RT"
+      exit 11
+   else
+      logger_info "RMAN configuration for Standby Database successful"
+   fi
+}
+#-----------------------------------------------------------------------
+#
+# Create Backup of spfile
+#
+#-----------------------------------------------------------------------
+SPILErman() {
+   logger_info "Create Backup of spfile with ORArman -s"
+   ORArman -s | logger_debug
+   if [ -f $ORACLE_HOME/dbs/init${DBNAME}.save ]
+   then
+      logger_info "Backup of spfile to $ORACLE_HOME/dbs/init${DBNAME}.save successful" ]
+   else
+      logger_warn "Backup of spfile to $ORACLE_HOME/dbs/init${DBNAME}.save not successful" ]
+   fi
+}
+#-----------------------------------------------------------------------
+#
+# Change SBT Channel for primary and standby database
+#
+#-----------------------------------------------------------------------
+changeSBTchannel() {
+   RMANDB=$1
+   POSTFIX=$2
+   logger_info "RMAN SBT Channel for Databasename $DBNAME"
+   typeset -l NBORACLIENT="ora${DBNAME}$POSTFIX"
+   logger_debug "NBORACLIENT = $NBORACLIENT"
+   cat <<EORMAN >${RMANCMD}
+CONFIGURE CHANNEL DEVICE TYPE 'SBT_TAPE' FORMAT '%d_%I_%s_%p_%c_%t' SEND 'NB_ORA_SERV=nbu1,NB_ORA_CLIENT=${NBORACLIENT},NB_ORA_POLICY=ora_linux01,NB_ORA_SCHED=Database_2w';
+EORMAN
+   RT=$(rman target sys/$sysPW@${RMANDB} catalog rman/rman@rcvcat cmdfile=$RMANCMD | logger_debug; echo $? )
+   if [ $RT -ne 0 ]
+   then
+      logger_error "RMAN configuration for Standby Database failed Returncode=$RT"
+      exit 11
+   else
+      logger_info "RMAN configuration for Standby Database successful"
+   fi
+}
+
+#-----------------------------------------------------------------------
+#
+# Get Control-M ENV
+#
+#-----------------------------------------------------------------------
+
+get_ctm_env() {
+CTMCONFIG=/opt/ctm_ag/pcmag1/ctm/data/CONFIG.dat
+if [ ! -s $CTMCONFIG ]
+then
+   MESSAGE="The CTRL-M environment is not defined correctly!"
+   logger_error "$MESSAGE"
+   MESSAGE="The config file $CTMCONFIG does not exist!"
+   logger_error "$MESSAGE"
+   return
+else
+   CTMENV=`grep HOST /opt/ctm_ag/pcmag1/ctm/data/CONFIG.dat|grep CTMSHOST|awk '{print $2}'|awk -F\. '{print $1}'|sed s/"-"//`
+fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     initialize automated configuration of foglight monitoring for standby site
+#-----------------------------------------------------------------------------------------------------------------
+write_ajc_data() {
+
+HOST=`hostname -s`
+logger_info "initialize automated configuration of foglight monitoring ..."
+${ORACLE_HOME}/bin/sqlplus -s / as sysdba <<EOSQL
+connect "BV\$AJC"/${PWDBVAJC}@dba-p
+insert into ajc_data(task,datacenter,nodename,db_instance,dgside,lsnrport,record_created)
+values('create','$CTMENV','$HOST','$DBNAME','$STANDBYSIDE','$PORT',sysdate);
+exit;
+EOSQL
+
+}
+
+#-----------------------------------------------------------------------
+#
+# Write Mail to Control-M Colleagues
+#
+#-----------------------------------------------------------------------
+
+writeCTMmail() {
+   logger_debug "15. Write Mail to CTM-Admins"
+   CTMSUBJECT="Einrichtung einer Host-Gruppe (fuer Dataguard Umgebung)"
+   typeset -l DBNAME_LC=$DBNAME
+   typeset -u DBNAME_UC=$DBNAME
+   typeset -l LX_DGSIDE1=`echo ${PRIMARYHOST} | cut -d. -f 1`
+   typeset -l LX_DGSIDE2=`hostname -s`
+   typeset -l LX_DOMAIN=`hostname -d`
+   cat <<EOMAIL | mail -s "$CTMSUBJECT" -b "$MAILTO" "$CTMMAILTO"
+Hallo Kollegen,
+
+bitte folgende Server:
+
+$LX_DGSIDE1
+$LX_DGSIDE2
+
+als Host-Gruppe ${DBNAME_LC}_dg
+
+im Control-M  ${CTMENV} einrichten.
+
+
+Aenderung bitte per Antwort auf diese Mail.
+
+
+Vielen Dank.
+
+Gruss
+die DB-Admins
+EOMAIL
+}
+
+#-----------------------------------------------------------------------
+#
+# Write Mail to NetBackup Colleagues
+#
+#-----------------------------------------------------------------------
+
+writeNBUmail() {
+   logger_debug "14. Write Mail to NBU-Admins"
+   NBUSUBJECT="Einrichtung Linux Host in NetBackup Policy (fuer Dataguard Umgebung)"
+   typeset -l DBNAME_LC=$DBNAME
+   typeset -u DBNAME_UC=$DBNAME
+   typeset -l LX_DGSIDE1=`echo ${PRIMARYHOST} | cut -d. -f 1`
+   typeset -l LX_DGSIDE2=`hostname -s`
+   typeset -l LX_DOMAIN=`hostname -d`
+   cat <<EOMAIL | mail -s "$NBUSUBJECT" -b "$MAILTO" "$NBUMAILTO"
+Hallo Kollegen,
+bitte die Konfigurationen der
+- NetBackup Policy und
+- der NBU Master Server
+wie nachfolgend dargestellt anpassen.
+
+
+1) NBU Policy Konfiguration
+
+NBU Policy		Linux Host
+
+ora_linux01		${LX_DGSIDE1}
+ora_linux01		${LX_DGSIDE2}
+ora_linux01		ora${DBNAME_LC}${PRIMARYSIDE_LC}
+ora_linux01		ora${DBNAME_LC}${STANDBYSIDE_LC}
+
+
+
+2) NBU Master Server Konfiguration
+
+2a) Image Directory and Links
+
+sudo /bin/mkdir /usr/openv/netbackup/db/images/ORA${DBNAME_UC}
+
+sudo /bin/ln -s /usr/openv/netbackup/db/images/ORA${DBNAME_UC} /usr/openv/netbackup/db/images/ora${DBNAME_LC}${PRIMARYSIDE_LC}
+sudo /bin/ln -s /usr/openv/netbackup/db/images/ORA${DBNAME_UC} /usr/openv/netbackup/db/images/ora${DBNAME_LC}${STANDBYSIDE_LC}
+
+
+2b) altname Konfiguration
+
+cd /usr/openv/netbackup/db/altnames
+echo "${LX_DGSIDE1}
+${LX_DGSIDE1}.${LX_DOMAIN}
+${LX_DGSIDE2}
+${LX_DGSIDE2}.${LX_DOMAIN}
+ora${DBNAME_LC}${PRIMARYSIDE_LC}
+ora${DBNAME_LC}${PRIMARYSIDE_LC}.${LX_DOMAIN}
+ora${DBNAME_LC}${STANDBYSIDE_LC}
+ora${DBNAME_LC}${STANDBYSIDE_LC}.${LX_DOMAIN}
+ORA_${DBNAME_UC}" > /usr/openv/netbackup/db/altnames/${LXDGSIDE1}
+
+sudo /bin/ln -s /usr/openv/netbackup/db/altnames/${LX_DGSIDE1} /usr/openv/netbackup/db/altnames/${LX_DGSIDE1}.${LX_DOMAIN}
+sudo /bin/ln -s /usr/openv/netbackup/db/altnames/${LX_DGSIDE1} /usr/openv/netbackup/db/altnames/${LX_DGSIDE2}
+sudo /bin/ln -s /usr/openv/netbackup/db/altnames/${LX_DGSIDE1} /usr/openv/netbackup/db/altnames/${LX_DGSIDE2}.${LX_DOMAIN}
+
+
+
+
+
+Aenderung bitte per Antwort auf diese Mail.
+
+
+Vielen Dank.
+
+Gruss
+die DB-Admins
+EOMAIL
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+# FUNCTION  configure huge pages
+#-----------------------------------------------------------------------------------------------------------------
+function config_huge_pages()
+{
+CTL_PARAMS="net.core.wmem_max net.core.wmem_default vm.nr_hugepages vm.dirty_expire_centisecs vm.swappiness kernel.shmmni vm.dirty_writeback_centisecs kernel.sem net.core.rmem_default vm.dirty_background_ratio net.core.rmem_max vm.dirty_ratio fs.aio-max-nr vm.hugetlb_shm_group"
+TMPSYSCTL=/tmp/tmp_sysctl.conf
+cp /etc/sysctl.conf $TMPSYSCTL
+COPY=0
+for PARM in $CTL_PARAMS
+do
+   grep $PARM $TMPSYSCTL  >/dev/null
+   if [ $? -ne 0 ]
+   then
+      if [ "$PARM" == "net.core.wmem_max" ]
+      then
+         echo "net.core.wmem_max = 1048576" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "net.core.wmem_default" ]
+      then
+         echo "net.core.wmem_default = 262144" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "vm.nr_hugepages" ]
+      then
+         echo "vm.nr_hugepages = 0" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "vm.dirty_expire_centisecs" ]
+      then
+         echo "vm.dirty_expire_centisecs = 500" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "vm.swappiness" ]
+      then
+         echo "vm.swappiness = 0" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "kernel.shmmni" ]
+      then
+         echo "kernel.shmmni = 4096" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "vm.dirty_writeback_centisecs" ]
+      then
+         echo "vm.dirty_writeback_centisecs = 100" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "kernel.sem" ]
+      then
+         echo "kernel.sem = 250 32000 100 128" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "net.core.rmem_default" ]
+      then
+         echo "net.core.rmem_default = 262144" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "vm.dirty_background_ratio" ]
+      then
+         echo "vm.dirty_background_ratio = 3" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "net.core.rmem_max" ]
+      then
+         echo "net.core.rmem_max = 4194304" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "vm.dirty_ratio" ]
+      then
+         echo "vm.dirty_ratio = 15" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "fs.aio-max-nr" ]
+      then
+         echo "fs.aio-max-nr = 1048576" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      elif [ "$PARM" == "vm.hugetlb_shm_group" ]
+      then
+         echo "vm.hugetlb_shm_group = 3301" >>$TMPSYSCTL
+         MESSAGE="Parameter $PARM zu /etc/sysctl.conf hinzugefuegt!"
+         logger_info "$MESSAGE"
+         COPY=1
+      else
+         echo "was tun bei Parameter $PARM!"
+      fi
+   fi
+done
+if [ $COPY -eq 1 ]
+then
+   sudo /bin/vi /etc/sysctl.conf <<EOIN >/dev/null 2>&1
+:!mv /tmp/tmp_sysctl.conf /etc/sysctl.conf
+:q
+EOIN
+   sudo /sbin/sysctl -p >/dev/null 2>&1
+fi
+TOTAL=`grep Huge /proc/meminfo|grep HugePages_Total|awk '{print $2}'`
+FREE=`grep Huge /proc/meminfo|grep HugePages_Free|awk '{print $2}'`
+MAXRUN=5
+RUN=0
+while [ $FREE -eq $TOTAL -o $FREE -lt 5 ]
+do
+#  echo "TOTAL: $TOTAL#"
+#  echo "FREE: $FREE#"
+   TOTAL_OLD=$TOTAL
+   sudo /usr/local/sbin/ORAsethugepages
+   MESSAGE="bouncing database!"
+   logger_info "$MESSAGE"
+   echo
+   ORAbounce_db -sid $DBNAME >/dev/null 2>&1
+   TOTAL=`grep Huge /proc/meminfo|grep HugePages_Total|awk '{print $2}'`
+   FREE=`grep Huge /proc/meminfo|grep HugePages_Free|awk '{print $2}'`
+   RUN=`expr $RUN + 1`
+   MESSAGE="Durchgang $RUN beendet!"
+   logger_info "$MESSAGE"
+   echo
+   if [ $TOTAL -eq $TOTAL_OLD ]
+   then
+      MESSAGE="no more hugepages required!"
+      logger_info "$MESSAGE"
+      break
+   elif [ $RUN -eq $MAXRUN ]
+   then
+      MESSAGE="$RUN Durchgaenge muessen reichen!"
+      logger_info "$MESSAGE"
+      break
+   fi
+done
+}
+
+#-----------------------------------------------------------------------
+#
+# Main
+#
+#-----------------------------------------------------------------------
+
+if [ $# -eq 0 ]
+then
+   usage
+   exit
+fi
+logger
+
+#
+# Read Parameter
+#
+PSOPTION=""
+while [ $# -gt 0 ]
+do
+   option="$1"
+   case $option in
+      -p)
+         PRIMARYHOST="$2"
+         shift
+         ;;
+      -ps)
+         PRIMARYSIDE="$2"
+         PRIMARYSIDE=`echo $PRIMARYSIDE|tr 'a-z' 'A-Z'`
+         PSOPTION="-ps $PRIMARYSIDE"
+         shift
+         ;;
+      -po)
+         PORT="$2"
+         shift
+         ;;
+      -d)
+         DBDEL=1
+         ;;
+      -b)
+         BLACKOUT=1
+         ;;
+      -s)
+         PRESTANDBY=1
+         ;;
+      -n)
+         PREPRIMARY=1
+         ;;
+      -m)
+         MAIL=1
+         ;;
+      -h)
+         usage
+         exit
+         ;;
+   esac
+   shift
+done
+if [ -z "$ORACLE_SID" ]
+then
+   logger_fatal "Variable ORACLE_SID not set!"
+   exit 1
+fi
+
+if [ -z "$TNS_ADMIN" ]
+then
+   logger_fatal "Parameter TNS_ADMIN not set!"
+   exit 1
+fi
+
+if [ -z "$PORT" ]
+then
+   logger_info "Parameter PORT not set! -> will use PORT 1601!"
+   PORT=1601
+fi
+
+if [ `hostname` == "$PRIMARYHOST" ]
+then
+   logger_fatal "Not started on Standby Host or wrong hostname for primary host"
+   exit 1
+fi
+
+if [ "$PRIMARYSIDE" == "S1" ]; then
+  STANDBYSIDE="S2"
+else
+  STANDBYSIDE="S1"
+fi
+PRIMARYSIDE_LC=`echo $PRIMARYSIDE|tr 'A-Z' 'a-z'`
+STANDBYSIDE_LC=`echo $STANDBYSIDE|tr 'A-Z' 'a-z'`
+PRIMARYDB=$DBNAME
+PRIMARYDBUNAME=${DBNAME}_${PRIMARYSIDE}
+STANDBYDB=$DBNAME
+STANDBYDBUNAME=${DBNAME}_${STANDBYSIDE}
+logger_debug "PRIMARYDB=$PRIMARYDBUNAME"
+logger_debug "STANDBYDB=$STANDBYDBUNAME"
+#
+# set environment for database
+#
+logger_info "set environment for database"
+#
+ORAENV_ASK=NO
+DBNAME=$ORACLE_SID
+. oraenv
+unset ORAENV_ASK
+
+#
+logger_debug "1. Read Sys Password"
+readPWD
+
+if [ "$DBDEL" -eq 1 ]
+then
+   logger_debug "2. Delete old database"
+   deleteDB
+fi
+
+logger_debug "Check Filesystem Size"
+checkSize
+
+if [ $PRESTANDBY -eq 1 ]
+then
+   logger_debug "3 Prepare Standby --> ORApreparestandby"
+   ${DIR}/ORApreparestandby -p $PRIMARYHOST -po $PORT $PSOPTION
+   if [ $? -ne 0 ]
+   then
+      logger_fatal "Error in Prepare Standby"
+      exit 10
+   fi
+fi
+#
+
+if [ $PREPRIMARY -eq 1 ]
+then
+   logger_debug "4 Prepare Primary --> ORAprepareprimary"
+   ${DIR}/ORAprepareprimary -p $PRIMARYHOST -po $PORT $PSOPTION
+   if [ $? -ne 0 ]
+   then
+      logger_fatal "Error in Prepare Primary"
+      exit 11
+   fi
+fi
+#
+
+logger_debug "5. Check if RMAN is able to connect to source database"
+checkRMAN
+#
+
+if [ "$BLACKOUT" -eq 1 ]
+then
+   logger_debug "6. Set Blackout"
+   ORAblackout -o start -d $STANDBYDB | logger_info
+fi
+#
+#
+logger_debug "7. Start instance with dummy pfile"
+startInstance
+#
+logger_debug "8. Duplicate Database"
+
+duplicateDB
+#
+logger_debug "9. Create Dataguard Broker Configuration"
+createDGBroker
+#
+logger_debug "10. Enable Flashback Database"
+enableFlashback
+#
+if [ "$BLACKOUT" -eq 1 ]
+then
+   logger_debug "11. Blackout End"
+   ORAblackout -o stop -d $STANDBYDB | logger_info
+fi
+#
+logger_debug "12. Register Database in Recovery Catalog"
+rmanconfigureDB
+logger_debug "13. Change SBT Client Directory"
+changeSBTchannel $PRIMARYDBUNAME $PRIMARYSIDE_LC
+changeSBTchannel $STANDBYDBUNAME $STANDBYSIDE_LC
+SPILErman
+
+get_ctm_env
+
+if [ "$MAIL" -eq 1 ]
+then
+   writeNBUmail
+   writeCTMmail
+fi
+
+write_ajc_data
+
+config_huge_pages
+
+#
+# Cleanup
+#
+rm ${RMANCMD}

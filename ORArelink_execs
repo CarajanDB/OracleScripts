@@ -1,0 +1,235 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORArelink_execs
+# @(#) Author      : Thorsten Thiel
+# @(#) Modified    : 
+# @(#)
+# @(#) Description : This script stops all instances, relinks all installed ORACLE executables and finally restarts all instances.
+# @(#)
+# @(#) Version     : 1.2
+# @(#) Datum       : 24.01.2023
+# @(#)
+# @(#) Presumption : This script
+# @(#)                1. must be started as user ORACLE
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)    1.0.0 13.07.2022  THI       Created
+# @@(#)    1.0.1 13.07.2022  THI       changed Bmsg syntax
+# @@(#)    1.0.2 13.07.2022  THI       removed sleep command and changed some output
+# @@(#)    1.0.3 13.07.2022  THI       removed some typos
+# @@(#)    1.1   18.07.2022  THI       make script invokable in ORAclone_db after software installation
+# @@(#)    1.2   24.01.2023  THI       deal with not existant relink exe
+# @(#) ================================================================================================================
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+source /app/oracle/bin/ORAlib
+HOST=`hostname -s`
+LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="This script stops all instances, relinks all installed ORACLE executables and finally restarts all instances.
+"
+SCRIPTDIR=/app/oracle/bin
+ORACLE_BASE="/app/oracle"
+NFSPWDDIR="/oranfs/share/ora_admin/SYSTEM/pwddir"
+PWDDIR="/app/oracle/admin/etc/pwddir"
+UC_FILE="/app/oracle/admin/config/backup/under_construction"
+
+source $SCRIPTDIR/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+   echo ".bash_functions file not found!"
+   exit $RC
+fi
+
+#notwendig fuer Aufruf per SSH vom Transferhost aus
+#bei Aufruf ueber SSH ist der PATH nicht vollstaendig gesetzt
+if [ -z $PATH ]
+then
+   if [ -s ~/.bashrc ]
+   then
+      source ~/.bashrc
+   fi
+fi
+
+echo $PATH|grep ":/sbin:" >/dev/null
+if [ $? -eq 1 ]
+then
+   PATH="$PATH:/sbin"
+fi
+#Notwendig fuer Aufruf per SSH vom Transferhost aus
+
+WHAT="$SCRIPTDIR/what"
+SCRIPTVERSION="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep 'Version     :'|awk '{print $3,$4,$5}'`"
+SCRIPTDATE="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep 'Date        :'|awk '{print $3,$4,$5}'`"
+
+Bmsg -bm "# =============================================================================="
+Bmsg -bm "$SCRIPTNAME - $SCRIPTSHORTDESC"
+Bmsg -bm "# =============================================================================="
+STARTTIME=`date +"%Y-%m-%d %k:%M:%S.%N"`
+Bmsg -bm "Start Time: $STARTTIME"
+
+Logger
+logger_info "$SCRIPTNAME gestartet"
+LOGDATE=`date +"%Y%m%d"`
+LOGFILE="/app/oracle/admin/log/${SCRIPTNAME}-${LOGDATE}.log"
+Bmsg -bm "All actions are logged in $LOGFILE!"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+ACTIVE_USER=`id -un`
+if [ "$ACTIVE_USER" != "oracle" ]; then
+  MESSAGE="Script may not run as user $ACTIVE_USER, it must be started and run as oracle"
+  Bmsg -rm "$MESSAGE"
+  logger_fatal "$MESSAGE"
+  RC=255
+  MESSAGE="Error Code: ${RC}"
+  Bmsg -rm "$MESSAGE"
+  logger_fatal "$MESSAGE"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     START of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+#
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: check entries in $ORACLE_HOME/network/admin/shrept.lst
+#-----------------------------------------------------------------------------------------------------------------
+check_shrept_lst ()
+{
+SHREPTFILE=$ORACLE_HOME/network/admin/shrept.lst
+SHREPTITEMS='nsdhctx_close'
+for ITEM in $SHREPTITEMS
+do
+   grep $ITEM $SHREPTFILE >/dev/null
+   if [ $? -eq 1 ]
+   then
+      ENTRY="network : $ITEM"
+      echo "$ENTRY" >>$SHREPTFILE
+      echo
+      MESSAGE="added >$ENTRY< to $SHREPTFILE"
+      Bmsg -bm "$MESSAGE"
+      logger_info "$MESSAGE"
+   fi
+done
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: chk_log_err
+#-----------------------------------------------------------------------------------------------------------------
+chk_log_err ()
+{
+OERR=`grep "ORA-" $CHECKEDLOG`
+
+if [ "$OERR" != "" ]
+then
+   echo
+   echo "$MESSAGE"
+   echo "$OERR"
+   echo
+   echo "exit ..."
+   exit 1
+fi
+}
+#-----------------------------------------------------------------------------------------------------------------
+#     END of FUNCTION SECTION
+#-----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+# Main
+#-----------------------------------------------------------------------------------------------------------------
+
+check_shrept_lst
+
+if [ -s /etc/oratab ]
+then
+   SIDS=`grep -v '^#' /etc/oratab|grep :|awk -F: '{print $1}'`
+fi
+
+# check relink executable
+if [ -s $ORACLE_HOME/bin/relink ]
+then
+#Instanzen herunterfahren
+   if [ ! -z $SIDS ]
+   then
+      echo
+      MESSAGE='Instanz(en) herunterfahren'
+      Bmsg -bm "$MESSAGE"
+      logger_info "$MESSAGE"
+      for DB in $SIDS
+      do
+         Bmsg -bm "$DB"
+         logger_info "$DB"
+         . dbset $DB
+   
+         sqlplus -s / as sysdba <<EOSQL | tee -a $LOG
+         shutdown transactional;
+EOSQL
+         if [ $? -ne 0 ]
+         then
+            MESSAGE="Instanz >$DB< konnte nicht heruntergefahren werden!"
+            Bmsg -rm "$MESSAGE"
+            logger_fatal "$MESSAGE"
+            exit 1
+         fi
+      done
+   fi
+
+#ORACLE-Executables relinken
+   echo
+   MESSAGE='ORACLE-Executables relinken'
+   Bmsg -bm "$MESSAGE"
+   logger_info "$MESSAGE"
+   MESSAGE="Logfile $ORACLE_HOME/install/relinkActions*.log"
+   Bmsg -bm "$MESSAGE"
+   logger_info "$MESSAGE"
+   umask 022
+   $ORACLE_HOME/bin/relink as_installed |tee -a $LOG
+      if [ $? -ne 0 ]
+      then
+         MESSAGE="Relinken fehlgeschlagen!"
+         Bmsg -rm "$MESSAGE"
+         logger_fatal "$MESSAGE"
+         exit 1
+      else
+         MESSAGE="Executables erfolgreich relinkt!"
+         Bmsg -bm "$MESSAGE"
+         logger_info "$MESSAGE"
+      fi
+
+#Instanzen booten
+   if [ ! -z $SIDS ]
+   then
+      echo
+      MESSAGE='Instanz(en) booten'
+      Bmsg -bm "$MESSAGE"
+      logger_info "$MESSAGE"
+      for DB in $SIDS
+      do
+         Bmsg -bm "$DB"
+         logger_info "$DB"
+         . dbset $DB
+      
+         sqlplus -s / as sysdba <<EOSQL | tee -a $LOG
+         startup;
+EOSQL
+         if [ $? -ne 0 ]
+         then
+            MESSAGE="Instanz >$DB< konnte nicht gestartet werden!"
+            Bmsg -rm "$MESSAGE"
+            logger_fatal "$MESSAGE"
+            exit 1
+         fi
+      done
+   fi
+else
+   MESSAGE="relink executable existiert nicht!"
+   Bmsg -bm "$MESSAGE"
+   logger_info "$MESSAGE"
+fi
+#####
+exit
+#####

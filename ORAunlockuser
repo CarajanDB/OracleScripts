@@ -1,0 +1,182 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAunlockUser
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.0
+# @(#) Date        : 2024-09-17
+# @(#) Description : Unlock Users locked within some few days
+# @(#)
+# @@(#)  Change History:
+# @@(#)  Version  Date        Author        Description
+# @@(#)  ------------------------------------------------------------------------------------------------
+# @@(#)  1.0      2024-09-17  jahr   Neue Version
+# @(#) ================================================================================================================
+# Set this variable if you want to test / develop on an other path
+ORABASEDIR="${ORABASEDIR:-/app/oracle}"
+ORABINDIR="${ORABINDIR:-/app/oracle/bin}"
+
+# Read Oracle Library including Logger
+source $ORABINDIR/ORAlib
+source $ORABINDIR/ORACDBlib
+DATUM=`date "+%y%m%d"`
+TIMESTAMP=`date "+%y%m%d_%H%M%S"`
+SQLFILE="/tmp/statement${DATUM}.sql"
+
+
+# Init log4sh with default logfile name
+Logger
+unset DBNAME
+
+# =================================================================================================
+#
+# Function Usage
+#
+# =================================================================================================
+
+usage() {
+  logger_debug "--> $FUNCNAME"
+  logger_info "Usage $0 -d Databasename | -l Locktime (days)"
+  logger_info "-d | --database databasename (only local)"
+  logger_info "-l | --locktime Number of days"
+  logger_info "Example: $0 -d D43K -l 2"
+  exit 1
+}
+
+# =================================================================================================
+#
+# Read Script Options (getopt)
+#
+# Define Options
+#
+#  SHORT --> short option (e.g. -d)
+#  LONG --> long option (e.g. --database)
+#  : means that a second argument is required
+#
+# Return Values
+#   0 : Successful
+#  10 : Unsuccessful
+#  11 : Invalid Argument
+#
+# =================================================================================================
+
+ReadOptions() {
+  logger_debug "--> Function $FUNCNAME"
+  if [ $# -eq 0 ]
+  then
+    logger_fatal "Arguments required"
+    return 10
+  fi
+  SHORT="d:l:"
+  LONG="database:locktime:"
+  logger_debug "LONG=$LONG"
+  logger_debug "Arguments=$*"
+  OPTIONS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@" 2>/dev/null)
+  RC=$?
+  logger_debug "OPTIONS=$OPTIONS"
+  if [ "$RC" -ne 0 ]
+  then
+    logger_fatal "Invalid Arguments"
+    return 11
+  fi
+
+  eval set -- $OPTIONS
+  while true
+  do
+    case $1 in
+      -h|--help)        usage
+                        shift;;
+      -d|--dbname)      DBNAME="$2"
+                        logger_debug "DBNAME=$DBNAME"
+                        shift 2;;
+      --)               shift;break;;
+      -l|--locktime)    LOCKTIME="$2"
+                        logger_debug "LOCKTIME=$LOCKTIME"
+                        shift 2;;
+      --)               shift;break;;
+    esac
+  done
+  logger_debug "<-- Function $FUNCNAME"
+  return 0
+}
+
+# =================================================================================================
+#
+# Unlock Local Users
+#
+# =================================================================================================
+
+UnlockLocalUsers() {
+  logger_debug "--> $FUNCNAME"
+#
+# Create SQL File
+#
+sqlplus -s / as sysdba <<EOSQL > /tmp/locked_accounts
+set serveroutput on
+spool /tmp/locked_accounts
+WHENEVER SQLERROR EXIT 1
+DECLARE
+  str VARCHAR2(1000);
+BEGIN
+  FOR c_rec IN (SELECT username FROM cdb_users
+   WHERE ACCOUNT_STATUS LIKE '%LOCKED%'
+     AND ORACLE_MAINTAINED='N'
+     AND LOCK_DATE > sysdate - $LOCKTIME)
+  LOOP
+    str := 'ALTER USER '||c_rec.username||' ACCOUNT UNLOCK';
+    EXECUTE IMMEDIATE str;
+    dbms_output.put_line(str);
+  END LOOP;
+END;
+/
+EOSQL
+  RC=$RC
+  logger_debug "<-- $FUNCNAME $RC"
+}
+
+# =================================================================================================
+#
+# Main
+#
+# =================================================================================================
+
+unset DBNAME
+unset LOCKTIME
+if [ $# -eq 0 ]
+then
+  usage
+  exit 1
+fi
+ReadOptions $*
+
+if [ -n "$LOCKTIME" ] && [ "$LOCKTIME" -eq "$LOCKTIME" ] 2>/dev/null 
+then
+  logger_debug "Locktime $LOCKTIME is a valid Number"
+else
+  logger_error "Locktime $LOCKTIME is not a valid Number"
+  exit 1
+fi
+
+# Check Instance
+
+if [ -n "$DBNAME" ]
+then
+  CheckInstance $DBNAME
+  RC=$?
+
+  if [ "$RC" -ne 0 ]
+  then
+    logger_error "Database $DBNAME not open"
+    exit 1
+  fi
+fi
+UnlockLocalUsers
+if [ $RC -ne 0 ]
+then
+  logger_error "Unable to Unlock Users for Database $DBNAME"
+  exit 1
+else
+  logger_info "Successfully unlocked Users in Database $DBNAME"
+  exit 0
+fi
+ 
+
+

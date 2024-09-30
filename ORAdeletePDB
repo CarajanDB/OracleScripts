@@ -1,0 +1,194 @@
+# @(#) ================================================================================================================
+# @(#) Filename    : ORAdeletePDB
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.0
+# @(#) Date        : 2024-02-22
+# @(#) Description : Delete a PDB with associated directories and files
+# @(#)
+# @@(#)  Change History:
+# @@(#)  Version  Date        Author        Description
+# @@(#)  ------------------------------------------------------------------------------------------------
+# @@(#)  1.0      2024-02-22  jahr          neue Version
+# @@(#)
+# @(#) ================================================================================================================
+
+#
+# Set Variable SCRIPTDIR if you want to test / develop
+#
+#
+if [ -z "$SCRIPTDIR" ]
+then
+  export SCRIPTDIR=/app/oracle/bin
+fi
+if [ -z "$ORABASEDIR" ]
+then
+  export ORABASEDIR=$ORACLE_BASE
+fi
+
+# Read Oracle Library including Logger
+#
+source $SCRIPTDIR/ORAlib
+source $SCRIPTDIR/ORACDBlib
+Logger _$2
+#
+# Read Variable Parameter
+#
+Parameter
+
+# =================================================================================================
+#
+# Function Usage
+#
+# =================================================================================================
+
+usage() {
+   logger_info "  Command     : $SCRIPTNAME"
+   logger_info "  Description : $SCRIPTSHORTDESC"
+   logger_info ""
+   logger_info "  Parameters  : -d | --database           Database Name "
+   logger_info "                -p | --pdb                Database Name "
+   logger_info "                -h | --help               help screen"
+   logger_info ""
+#   logger_info "                --skip 1                  skip PDB Creation"
+#   logger_info "                --skip 2                  skip Directory Service registration"
+#   logger_info "                --skip 3                  skip Mandatory Script Creation"
+
+   logger_info ""
+   logger_info "  Example     : $SCRIPTNAME --database CABCK --pdb JOTEST1"
+   logger_info ""
+   logger_info "  Attention   : This script must be started as user ORACLE"
+   logger_info ""
+   exit 99
+
+}
+
+# =================================================================================================
+#
+# Read Script Options (getopt)
+#
+# Define Options
+#
+#  SHORT --> short option (e.g. -d)
+#  LONG --> long option (e.g. --database)
+#  : means that a second argument is required
+#
+# Return Values
+#   0 : Successful
+#  10 : Unsuccessful
+#  11 : Invalid Argument
+#
+# =================================================================================================
+
+ReadOptions() {
+   logger_debug "--> Function $FUNCNAME"
+   if [ $# -eq 0 ]
+   then
+      logger_fatal "Arguments required"
+      return 10
+   fi
+   SHORT="hd:p:"
+   LONG="help,database:,pdb:,skip:"
+   logger_debug "LONG=$LONG"
+   logger_debug "Arguments=$*"
+   OPTIONS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@" 2>/dev/null)
+   RC=$?
+   logger_debug "OPTIONS=$OPTIONS"
+   if [ "$RC" -ne 0 ]
+   then
+      logger_fatal "Invalid Arguments"
+      return 11
+   fi
+
+   eval set -- $OPTIONS
+   while true
+   do
+      case $1 in
+           -h|--help)        usage
+                             shift;;
+           -d|--database)    DBNAME="$2"
+                             logger_debug "DBNAME=$DBNAME"
+                             shift 2;;
+           -p|--pdb)         PDBNAME="$2"
+                             logger_debug "PDBNAME=$PDBNAME"
+                             shift 2;;
+           --skip)           SKIP=$1
+                             logger_debug "SKIP=$SKIP"
+                             shift 2;;
+           --)               shift;break;;
+     esac
+   done
+   logger_debug "<-- Function $FUNCNAME"
+   return 0
+}
+
+
+# =================================================================================================
+#
+# Main
+#
+# =================================================================================================
+
+ReadOptions $*
+RC=$?
+if [ $RC -ne 0 ]
+then
+   usage
+fi
+
+# Check if DBNAME is set
+
+if [ "$DBNAME" = "NONE" ]
+then
+   logger_error "Databasename not set"
+   usage
+fi
+DBNAME=$(echo $DBNAME|tr '[:lower:]' '[:upper:]')
+logger_debug "DBNAME=$DBNAME"
+
+# Check if PDBNAME is set
+
+if [ "$PDBNAME" = "NONE" ]
+then
+   logger_error "PDBNAME not set"
+   usage
+fi
+PDBNAME=$(echo $PDBNAME|tr '[:lower:]' '[:upper:]')
+logger_debug "PDBNAME=$PDBNAME"
+
+# Check if Instance is running
+InstanceUp $DBNAME
+RC=$?
+if [ "$RC" -ne 0 ]
+then
+   logger_error "Instance $DBNAME is not open"
+   exit 1
+fi
+
+# Check if PDB exists
+
+PDBExists $PDBNAME
+RC=$?
+if [ $RC -ne 0 ]
+then
+   logger_error "Pluggable Database $PDBNAME does not exist"
+   exit 1
+fi
+
+PDBConnect $PDBNAME
+RC=$?
+if [ $RC -gt 0 ]
+then
+   logger_error "There are still sessions connected to Pluggable Database $PDBNAME"
+   exit 1
+fi
+
+DeletePDB $DBNAME $PDBNAME
+RC=$?
+if [ $RC -ne 0 ]
+then
+   logger_error "Unable to delete Pluggable Database $PDBNAME"
+   exit 2
+fi
+
+logger_info "Pluggable Database $PDBNAME successfully deleted"
+exit 0

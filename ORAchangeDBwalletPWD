@@ -1,0 +1,169 @@
+#!/bin/bash
+# ================================================================================================================
+#  File        : ORAchangeDBwalletPWD
+#  Author      : Marcel Pils
+#  Modified    :
+#
+#  Description : Set a new passwort for an oracle database wallet file
+#
+#  Version     : 1.1
+#
+#
+#  Attention   : This script must be started as user ORACLE
+#
+#  Change History:
+#
+#    1.0  2016-06-20  Pils            Created
+#    1.1  2018-01-25  Pils            changed pwddir location
+#
+# ----------------------------------------------------------------------------------------------------------------
+#
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+#MAILTO="unix-dba@barmenia.de"
+HOST=`hostname -s`
+LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Set a new database wallet password"
+ORACLE_BASE="/app/oracle"
+LOGDIR="/app/logs"
+#LOGFILE="${LOGDIR}/${SCRIPTNAME}_`date +%Y%m%d%H%M%S%N`.log"
+LOGFILE="/tmp/${SCRIPTNAME}.log"
+
+source /app/oracle/bin/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+ echo ".bash_functions file not found!"
+ exit $RC
+fi
+
+PWDDIR="/app/oracle/admin/etc/pwddir"
+NEWPWDFILE="$PWDDIR/.pwdfile_eus_dbwallet"
+OLDPWDFILE="$PWDDIR/.oldpwdfile_eus_dbwallet"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : $SCRIPTNAME"
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters  : -wallet,          Database Wallet Directory"
+echo "                [-newpwd],        New wallet pasword,  Default: $NEWPWDFILE"
+echo "                [-oldpwd],        Old wallet pasword,  Default: $OLDPWDFILE"
+echo "                -h,               help screen"
+echo ""
+echo "  Example     : $SCRIPTNAME -wallet /app/oracle/admin/<DBUNAME>/wallet -oldpwd alt -newpwd neu"
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+echo ""
+exit
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort   
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  Bmsg -rm "Script may not run as user `id -un`, it must be started and run as oracle"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if ORACLE_HOME is set
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" = "x${ORACLE_HOME}" ]; then
+  Bmsg -rm "ORACLE_HOME not set. It must be set first!"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+while true; do
+  case "$1" in
+    -wallet ) WALLET="$2"; wallet=1; shift 2 ;;
+    -newpwd ) NEWPWD="$2"; newpwd=1; shift 2 ;;
+    -oldpwd ) OLDPWD="$2"; oldpwd=1; shift 2 ;;
+    -h | --help ) usage ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the option
+#-----------------------------------------------------------------------------------------------------------------
+
+if [ "x" == "x$wallet" ]; then
+  Bmsg -rm "-wallet [option] is required"; echo ""; usage
+fi
+
+if [ "x" == "x$newpwd" -a ! -r $NEWPWDFILE ]; then
+  Bmsg -rm "File $NEWPWDFILE not readable"; echo ""; usage
+fi
+if [ "x" == "x$oldpwd" -a ! -r $OLDPWDFILE ]; then
+  Bmsg -rm "File $OLDPWDFILE not found"; echo ""; usage
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Set Environment
+#-----------------------------------------------------------------------------------------------------------------
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptstart "${SCRIPTNAME} - ${SCRIPTSHORTDESC}"
+
+if [ "x" == "x$newpwd" ]; then
+  if [ -r $NEWPWDFILE ]; then
+    NEWPWD=`cat $NEWPWDFILE|awk -F"'" '{print $2}'`
+  else
+    Bmsg -rm "ERROR: can't read file $NEWPWDFILE!"
+  fi
+fi
+
+if [ "x" == "x$oldpwd" ]; then
+  if [ -r $OLDPWDFILE ]; then
+    OLDPWD=`cat $OLDPWDFILE|awk -F"'" '{print $2}'`
+  else 
+    Bmsg -rm "ERROR: can't read file $OLDPWDFILE!"
+  fi
+fi
+
+##### Change wallet password by using orapki #####
+
+CMD="${ORACLE_HOME}/bin/orapki  wallet change_pwd -wallet $WALLET "
+echo "Running '"$CMD"'..."
+
+${CMD} <<EOF 2>&1 | tee $LOGFILE
+${OLDPWD}
+${NEWPWD}
+EOF
+RC=$?
+#echo "RC=$RC"
+MYRC=$(grep -e "PKI-" -e "Unable to change" $LOGFILE|wc -l)
+#echo "MYRC=$MYRC"
+RC=$MYRC
+
+if [ $MYRC -ne 0 ]; then
+  Bmsg -rm "ERROR: password change failed for wallet $WALLET!"
+else
+  Bmsg -gm "Password successfully changed for wallet $WALLET."
+fi
+Bmsg -bm "A logfile is written to $LOGFILE."
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptend 
+exit $RC
+

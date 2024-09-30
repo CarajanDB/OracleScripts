@@ -1,0 +1,166 @@
+#!/bin/bash
+# ================================================================================================================
+#  File        : ORAcreateoid
+#  Author      : Thorsten Thiel
+#  Modified    :
+#
+#  Description : This script creates new Oracle Internet Diretcory entries
+#
+#  Version     : 1.1
+#
+#
+#  Attention   : This script must be started as user ORACLE
+#
+#  Change History:
+#
+#    1.0  2012-06-21  Thiel            Created
+#    1.1  2018-01-25  Pils             changed pwddir location
+#
+# ----------------------------------------------------------------------------------------------------------------
+#
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+#MAILTO="unix-dba@barmenia.de"
+LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Creates Oracle Internet Directory entries"
+ORACLE_BASE="/app/oracle"
+LOGDIR="/app/logs"
+LOGFILE="${LOGDIR}/${SCRIPTNAME}_`date +%Y%m%d%H%M%S%N`.log"
+LDAPADD="~/product/11.2.0/db112040/bin/ldapadd"
+PWDDIR="/app/oracle/admin/etc/pwddir"
+
+source /app/oracle/bin/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+ echo ".bash_functions file not found!"
+ exit $RC
+fi
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : $SCRIPTNAME"
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters  : [-host],        full qualified hostname   Default: current host"
+echo "                -sid,           Database Name "
+echo "                -port,          unique Listener Port      [1600-1699]"
+echo "                [-oid],         OID-Service-name          Default: Database Name"
+echo "                [-dbsrv],       DB-Service-name           Default: Database Name"
+echo "                -h|-?,          help screen"
+echo ""
+echo "  Example     : ORAcreateoid [-host lxkja.unix.lan] -sid MARS -port 1633 -oid srv1"
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+echo ""
+exit
+}
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort   
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  Bmsg -rm "Script may not run as user `id -un`, it must be started and run as oracle"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if ORACLE_HOME is set
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" = "x${ORACLE_HOME}" ]; then
+  Bmsg -rm "ORACLE_HOME not set. It must be set first!"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+while true; do
+  case "$1" in
+    -host | --hostname ) HOST="$2";host=1; shift 2 ;;
+    -port | --listenerport ) PORT="$2";port=1; shift 2 ;;
+    -sid | --oracle_sid ) ORACLE_SID="$2";sid=1; shift 2 ;;
+    -oid | --oidservice ) OID="$2";oid=1; shift 2;;
+    -dbsrv | --dbservice ) DBSRV="$2";dbsrv=1; shift 2;;
+    -desc | --description ) DESC="$2";desc=1; shift 2;;
+    -? | -h | --help ) usage ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the option
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" == "x$sid" ]; then
+  Bmsg -rm "-sid | --oracle_sid [option] is required"; echo ""; usage
+fi
+if [ "x" == "x$port" ]; then
+  Bmsg -rm "-port | --listenerport [option] is required"; echo ""; usage
+fi
+if [ "x" == "x$oid" ]; then
+  OID=$ORACLE_SID
+fi
+if [ "x" == "x$dbsrv" ]; then
+  DBSRV=${ORACLE_SID}.unix.lan
+fi
+
+#DB-Servicename auf Domain pruefen
+echo $DBSRV|grep "unix.lan" >/dev/null 2>&1
+if [ $? -eq 1 ]; then
+   DBSRV=`echo "${DBSRV}.unix.lan"`
+fi
+if [ "x" == "x$host" ]; then
+  HOST=$LONGHOST
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptstart -l $LOGFILE "${SCRIPTNAME} - ${SCRIPTSHORTDESC}"
+
+if [ $oid -eq 1 ]
+then
+   Bmsg -1l $LOGFILE -m "OID Service anlegen ..."
+   if [ "x$OID" == "x" ]
+   then
+      OID=$ORACLE_SID
+   else
+      OID=`echo $OID|sed s/,/r/g`
+   fi
+   cat <<EOOID >/tmp/cr_${OID}_oid.ldif
+dn: cn=${OID},cn=OracleContext,dc=unix,dc=lan
+cn: ${OID}
+objectclass: top
+objectclass: orclNetService
+orclnetdescstring: (DESCRIPTION=(FAILOVER=ON)(ADDRESS=(PROTOCOL=TCP)(HOST=${HOST})(PORT=${PORT}))(CONNECT_DATA=(SERVICE_NAME=${DBSRV})(FAILOVER_MODE=(TYPE=SELECT)(METHOD=BASIC)(BACKUP=${OID})(RETRIES=20)(DELAY=5))))
+EOOID
+   OIDPWD=`cat ${PWDDIR}/.pwdfile_oid|awk -F= '{print $2}'`
+   CMD="$LDAPADD -h oid1 -p 389 -D 'cn=orcladmin' -w $OIDPWD -f /tmp/cr_${OID}_oid.ldif"
+   Bmsg -l $LOGFILE -m "$CMD"
+   bash -c "$CMD"
+   RC=$?
+   if [ $RC -eq 0 ]
+   then
+      rm /tmp/cr_${OID}_oid.ldif
+   fi
+fi
+
+##thi 18.06.2014
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptend -l $LOGFILE
+exit

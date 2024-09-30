@@ -1,0 +1,211 @@
+#!/bin/bash
+# @(#) ================================================================================================================
+# @(#)  File        : ORAdbservice
+# @(#)  Author      : Marcel Pils
+# @(#)  Modified    :
+# @(#)
+# @(#)  Description : Scipt to manage Oracle DB Services
+# @(#)
+# @(#)  Version     : 1.0
+# @(#)
+# @(#)
+# @(#)  Attention   : This script must be started as user ORACLE
+# @(#)
+# @@(#)  Change History:
+# @@(#)
+# @@(#)    1.0  2012-06-21  Pils             Created
+# @@(#)
+# @(#) ----------------------------------------------------------------------------------------------------------------
+#
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+#MAILTO="unix-dba@barmenia.de"
+HOST=`hostname -s`
+LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Manage Oracle DB Services"
+ORACLE_BASE="/app/oracle"
+LOGDIR="/app/logs"
+LOGFILE="${LOGDIR}/${SCRIPTNAME}_`date +%Y%m%d%H%M%S%N`.log"
+BINDIR="/app/oracle/bin"
+
+source /app/oracle/bin/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+ echo ".bash_functions file not found!"
+ exit $RC
+fi
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : $SCRIPTNAME"
+echo "  Description : $SCRIPTSHORTDESC"
+echo ""
+echo "  Parameters  : -opt,                     Operation (add|remove)"
+echo "                -dbsrv,                   Database Service Name (without domain 'unix.lan')"
+echo "                -h,                       help screen"
+echo ""
+echo "  Example     : $SCRIPTNAME -opt add -dbsrv myservice"
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+echo ""
+exit
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Create DB Servcie
+#-----------------------------------------------------------------------------------------------------------------
+function create_dbservice()
+{
+   Bmsg -m "Create DB Service '$1'"
+   ${ORACLE_HOME}/bin/sqlplus -s / as sysdba <<EOF 
+whenever sqlerror exit failure
+whenever oserror exit failure
+variable retval number;
+begin
+ :retval := 0;
+ DBMS_SERVICE.CREATE_SERVICE(service_name=>'$1.$DBDOMAIN',network_name=>'$1.$DBDOMAIN');
+ DBMS_SERVICE.START_SERVICE(service_name=>'$1.$DBDOMAIN');
+exception 
+ when others then
+ :retval := 1;
+ raise;
+end;
+/
+set lin 80
+col name for a30
+col network_name for a30
+col started for a5
+select s.name,s.network_name,
+       case when (select 1 from v\$active_services a where a.service_id=s.service_id) = 1 then 'TRUE' else 'FALSE' end as STARTED 
+  from v\$services s
+ where s.network_name = '$1.$DBDOMAIN';
+exit :retval;
+EOF
+
+   RC=$?
+   if [ $RC -ne 0 ]; then
+     Bmsg -r -m "DB-Service creation failed!"
+   else
+     Bmsg -g -m "DB-Service successfully created"
+   fi
+   return $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: Remove DB Servcie
+#-----------------------------------------------------------------------------------------------------------------
+function drop_dbservice()
+{
+   Bmsg -m "Remove DB Service '$1'"
+   ${ORACLE_HOME}/bin/sqlplus -s / as sysdba <<EOF | tee /tmp/mp.log
+whenever sqlerror exit failure
+whenever oserror exit failure
+variable retval number;
+begin
+ :retval := 0;
+ begin
+  DBMS_SERVICE.STOP_SERVICE(service_name=>'$1.$DBDOMAIN');
+ exception when others then
+  null;
+ end;
+ DBMS_SERVICE.DELETE_SERVICE(service_name=>'$1.$DBDOMAIN');
+exception when others then
+ :retval := 1;
+ raise;
+end;
+/
+exit :retval;
+EOF
+
+   RC=$?
+   if [ $RC -ne 0 ]; then
+     Bmsg -r -m "DB-Service removal failed!"
+   else
+     Bmsg -g -m "DB-Service successfully removed"
+   fi
+   return $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort   
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  Bmsg -rm "Script may not run as user `id -un`, it must be started and run as oracle"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if ORACLE_HOME is set
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" = "x${ORACLE_HOME}" ]; then
+  Bmsg -rm "ORACLE_HOME not set. It must be set first!"
+  RC=255
+  Bmsg -rm "Error Code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+while true; do
+  case "$1" in
+    -opt | --option ) OPTION=$2; opt=1; shift 2 ;;
+    -dbsrv | --db_service ) DBSERVICE=$2; dbsrv=1; shift 2 ;;
+    -h | --help ) usage ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+
+OPTION=`echo $OPTION|tr 'A-Z' 'a-z'`
+DBSERVICE=`echo $DBSERVICE|tr 'a-z' 'A-Z'`
+
+#-----------------------------------------------------------------------------------------------------------------
+#     test to see if they gave the option
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x" == "x$opt" ]; then
+  Bmsg -rm "-opt | --option is required"; echo ""; usage
+else
+  if [ "$OPTION" != "add" -a "$OPTION" != "remove" ]; then
+    Bmsg -rm "Wrong value for -opt | --option. Values 'add' or 'remove' are allowed only!"; echo ""; usage
+  fi
+fi
+if [ "x" == "x$dbsrv" ]; then
+  Bmsg -rm "-dbsrv | --db_service is required"; echo ""; usage
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Set Environment
+#-----------------------------------------------------------------------------------------------------------------
+DBDOMAIN="unix.lan"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+#Bscriptstart -l $LOGFILE "${SCRIPTNAME} - ${SCRIPTSHORTDESC}"
+Bscriptstart "${SCRIPTNAME} - ${SCRIPTSHORTDESC}"
+
+
+if [ "$OPTION" == "add" ]; then
+  create_dbservice "$DBSERVICE"
+elif [ "$OPTION" == "remove" ]; then
+  drop_dbservice "$DBSERVICE"
+fi
+
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+#Bscriptend -l $LOGFILE
+Bscriptend
+exit

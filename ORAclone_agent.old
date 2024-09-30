@@ -1,0 +1,303 @@
+#!/bin/bash
+# ================================================================================================================
+#  File        : ORAclone_agent
+#  Author      : Daniel Oberdick
+#  Modified    : Marcel Pils
+#
+#  Description : This script installs an EM12c agent
+#
+#  Version     : 2.0
+#
+#
+#  Attention   : This script must be started as user ORACLE
+#
+#  Change History:
+#
+#    1.0  2012-06-21  Oberdick                        Created
+#    2.0  2012-11-27  Pils                            Changed a lot of
+#
+# ----------------------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+#MAILTO="unix-dba@barmenia.de"
+#HOST=`hostname -s`
+#LONGHOST=`hostname -f`
+SCRIPTNAME=$(basename $0)
+SCRIPTSHORTDESC="Clone's an oracle db software image"
+ORACLE_BASE="/app/oracle"
+LOGDIR="/app/logs"
+LOGFILE="${LOGDIR}/${SCRIPTNAME}_`date +%Y%m%d%H%M%S%N`.log"
+DEFAULTOMS=old
+DEFAULTPKG=agent121010.zip
+DEFAULTDIR=agent
+OLDOMS=oraem.unix.lan
+NEWOMS=oraoms.unix.lan
+
+source /app/oracle/bin/.bash_functions
+RC=$?
+if [ $RC -ne 0 ]; then
+ echo ".bash_functions file not found!"
+ exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+# FUNCTION: Help routine
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+echo ""
+echo "  Command     : $SCRIPTNAME"
+echo ""
+echo "  Parameters  : -dir,            (optional)   Agent base directory name,            Default: $DEFAULTDIR"
+echo "              : -oms {new|old},  (optional)   OMS Server to use in Configuration,   Default: $DEFAULTOMS"
+echo "              : -pkg {pkgname},  (optional)   Agent package to use in installation, Default: $DEFAULTPKG"
+echo "              : -l,              (optional)   Lists all available agent packages"
+echo ""
+echo "  Example     : $SCRIPTNAME" 
+echo "              : $SCRIPTNAME -l" 
+echo "              : $SCRIPTNAME -dir agent121030 -pkg agent121030.zip -oms new" 
+echo ""
+echo "  Attention   : This script must be started as user ORACLE"
+exit
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Check if user is oracle, otherwise abort
+#-----------------------------------------------------------------------------------------------------------------
+if [ `id -un` != "oracle" ]; then
+  Bmsg -rm "Script may not run as user `id -un`, it must be started and run as oracle"
+  RC=255
+  Bmsg -rm "error code: ${RC}"
+  exit $RC
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Get Parameter
+#-----------------------------------------------------------------------------------------------------------------
+while true; do
+  case "$1" in
+    -dir ) DIR="$2";dir=1; shift 2 ;;
+    -oms ) OMS="$2";oms=1; shift 2 ;;
+    -pkg ) PKG="$2";pkg=1; shift 2 ;;
+    -l | --list ) list=1; shift 1 ;;
+    -h | --help | -? ) usage ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Set Environment
+#-----------------------------------------------------------------------------------------------------------------
+OSDBA_GROUP="dba"
+OSOPER_GROUP="oper"
+OMS="${OMS-$DEFAULTOMS}"
+OMS_LC=$(echo $OMS|tr '[:upper:]' '[:lower:]')
+if [ "$OMS_LC" = "old" ];then
+  OMSSERVER=$OLDOMS
+else
+  OMSSERVER=$NEWOMS
+fi
+AGENTDIRNAME="${DIR-$DEFAULTDIR}"
+AGENTZIP="${PKG-$DEFAULTPKG}"
+if [ "x$version" = "x" ]; then
+  AGENTVERSION=$DEFAULTAGENTVERSION
+else
+  AGENTVERSION=$AGENTVERSION
+fi
+AGENT_BASE="${ORACLE_BASE}/product/em/$AGENTDIRNAME"
+AGENT_HOME="$AGENT_BASE/agent_inst"
+TZ="Europe/Berlin"
+CLONESOURCEDIR="${ORACLE_BASE}/software/clones/12.1.0/agent"
+RESPONSEFILE="${ORACLE_BASE}/bin/templates/agentca/additional_agent_${OMS_LC}oms.rsp"
+ORAINVENTORY="/app/oraInventory/ContentsXML/inventory.xml"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     some checks
+#-----------------------------------------------------------------------------------------------------------------
+if [ "x$list" = "x1" ]; then
+  Bmsg -bm "Available agent packages ..."
+  ls -1 $CLONESOURCEDIR|grep ".zip"
+  exit
+fi
+
+if [ "x$oms" = "x1" ] && [ "$OMS" != "new" ] && [ "$OMS" != "old" ]; then
+  Bmsg -rm "Wrong value for -oms option. Only 'old' or 'new' are allowed."
+  exit 254
+fi
+
+if [ "x$pkg" = "x1" ] && [ ! -r $CLONESOURCEDIR/$AGENTZIP ]; then
+  Bmsg -rm "Agent package '$CLONESOURCEDIR/$AGENTZIP' doesn't exists"
+  exit 255 
+fi
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - start
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptstart -l $LOGFILE "${SCRIPTNAME} - ${SCRIPTSHORTDESC}"
+
+##### Oracle Inventory Check #########
+Bmsg -1l $LOGFILE -m "Check if AGENT_BASE exists in oracle inventory"
+ORAINVLINE=$(grep "${AGENT_BASE}" $ORAINVENTORY|grep -v "REMOVED=\"T\"")
+if [ "$ORAINVLINE" != "" ]; then
+  Bmsg -rl $LOGFILE -m "$AGENT_BASE still exists in Oracle Inventory.\n"
+  Bmsg -l $LOGFILE -m "$ORAINVLINE"
+  Bmsg -rl $LOGFILE -m "\nYou have to remove it first from $ORAINVENTORY"
+  RC=255
+  Bmsg -rl $LOGFILE -m "error code: ${RC}"
+  Bscriptend -l $LOGFILE
+  exit $RC
+else
+  Bmsg -gl $LOGFILE -m "Oracle Inventory check succeeded."
+fi
+
+##### AGENT_BASE Directory Check #########
+Bmsg -1l $LOGFILE -m "Check if AGENT_BASE directory already exists ..."
+if [ -d ${AGENT_BASE} ];then
+  Bmsg -rl $LOGFILE -m "${AGENT_BASE} directory already exists"
+  RC=255
+  Bmsg -rl $LOGFILE -m "error code: ${RC}"
+  Bscriptend -l $LOGFILE
+  exit $RC
+else
+  Bmsg -gl $LOGFILE -m "AGENT_BASE directory check succeeded."
+  umask 0022
+  mkdir -p ${AGENT_BASE}
+  rmdir ${AGENT_BASE}
+fi
+
+##### Unpack Agent Image ########
+Bmsg -1l $LOGFILE -m "Unpack Agent Image ..."
+CMD="unzip ${CLONESOURCEDIR}/${AGENTZIP} -d ${AGENT_BASE} >> ${LOGFILE}"
+Bmsg -l $LOGFILE -m  "$CMD"
+bash -c "$CMD"
+RC=$?
+if [ $RC -ne 0 ]
+then
+  Bmsg -rl $LOGFILE -m "Unpack failed with error code: $RC"
+  Bscriptend -l $LOGFILE
+  exit $RC
+else
+  Bmsg -gl $LOGFILE -m "Unpack succeeded."
+fi
+
+##### Check Agent Software PreReqs  #########
+Bmsg -1l $LOGFILE -m "Check Agent Software PreReqs..."
+export TZ="${TZ}"
+CMD="${AGENT_BASE}/agentDeploy.sh -prereqOnly AGENT_BASE_DIR=${AGENT_BASE} RESPONSE_FILE=${RESPONSEFILE} >> ${LOGFILE}"
+Bmsg -l $LOGFILE -m  "$CMD"
+Bmsg -bm  "This needs some time! Please wait .."
+bash -c "$CMD"
+RC=$?
+if [ $RC -ne 0 ]
+then
+  Bmsg -rl $LOGFILE -m "Check Agent PreReqs failed with error code: $RC"
+  Bscriptend -l $LOGFILE
+  exit $RC
+else
+  Bmsg -gl $LOGFILE -m "Check agent PreReqs succeeded."
+fi
+
+
+##### Clone Agent Software #########
+Bmsg -1l $LOGFILE -m "Clone Agent Software ..."
+export TZ="${TZ}"
+CMD="${AGENT_BASE}/agentDeploy.sh -ignorePrereqs -ignoreUnzip -softwareOnly AGENT_BASE_DIR=${AGENT_BASE} RESPONSE_FILE=${RESPONSEFILE} >> ${LOGFILE}"
+Bmsg -l $LOGFILE -m  "$CMD"
+Bmsg -bm  "This needs some time! Please wait .."
+bash -c "$CMD"
+RC=$?
+if [ $RC -ne 0 ]
+then
+  Bmsg -rl $LOGFILE -m "Clone failed with error code: $RC"
+  Bscriptend -l $LOGFILE
+  exit $RC
+else
+  Bmsg -gl $LOGFILE -m "Clone succeeded."
+fi
+
+##### Configure Agent Software #####
+Bmsg -1l $LOGFILE -m "Configure Agent Software ..."
+export TZ="${TZ}"
+CMD="${AGENT_BASE}/agentDeploy.sh -configOnly AGENT_BASE_DIR=${AGENT_BASE} RESPONSE_FILE=${RESPONSEFILE} >> ${LOGFILE}"
+Bmsg -l $LOGFILE -m  "$CMD"
+Bmsg -bm  "This needs some time! Please wait .."
+bash -c "$CMD"
+RC=$?
+if [ $RC -ne 0 ]
+then
+  Bmsg -rl $LOGFILE -m "Configuration failed with error code: $RC"
+  Bscriptend -l $LOGFILE
+  exit $RC
+else
+  Bmsg -gl $LOGFILE -m "Configuration succeeded."
+fi
+
+##### Execute root.sh ##############
+Bmsg -1l $LOGFILE -m "Run sudo root.sh ..."
+ROOTSH=$(ls -1 ${AGENT_BASE}/core/*/root.sh)
+CMD="sudo ${ROOTSH} >> ${LOGFILE}"
+Bmsg -l $LOGFILE -m  "$CMD"
+bash -c "$CMD"
+RC=$?
+if [ $RC -ne 0 ]
+then
+  Bmsg -rl $LOGFILE -m "sudo root.sh failed with error code: $RC"
+  Bscriptend -l $LOGFILE
+  exit $RC
+else
+  Bmsg -gl $LOGFILE -m "sudo root.sh succeeded."
+fi
+
+##### remove agentcoreimage.zip ####
+Bmsg -1l $LOGFILE -m "remove agentcoreimage.zip ..."
+CMD="rm -rf ${AGENT_BASE}/agentcoreimage.zip"
+Bmsg -l $LOGFILE -m  "$CMD"
+bash -c "$CMD"
+RC=$?
+if [ $RC -ne 0 ]
+then
+  Bmsg -rl $LOGFILE -m "Removal failed with error code: $RC"
+  Bscriptend -l $LOGFILE
+  exit $RC
+else
+  Bmsg -gl $LOGFILE -m "Removal succeeded."
+fi
+
+##### cat /etc/oragchomelist #######
+Bmsg -1l $LOGFILE -m "\nshow /etc/oragchomelist content ..."
+CMD="cat /etc/oragchomelist"
+Bmsg -l $LOGFILE -m  "$CMD"
+bash -c "$CMD" | tee -a $LOGFILE
+
+##### show agent status ############
+Bmsg -1l $LOGFILE -m "\nshow agent status ..."
+Bmsg -1l $LOGFILE -m " "
+$AGENT_HOME/bin/emctl status agent | tee -a $LOGFILE
+
+##### Print emcli Commands #####
+LCS="<Production|Stage|Development|Test>"
+DEPT="Standard"
+TARGET="${LONGHOST}:<Port>"
+Bmsg -1l $LOGFILE -m "\nSet agent properties in EM repository ..."
+Bmsg -l $LOGFILE -m "Use next commands:"
+Bmsg -bl $LOGFILE -m "ssh $OMSSERVER"
+Bmsg -bl $LOGFILE -m "sudo su - oracle"
+Bmsg -bl $LOGFILE -m ". dbset oms"
+Bmsg -bl $LOGFILE -m "emcli login -username=SYSMAN"
+Bmsg -bl $LOGFILE -m "emcli sync"
+Bmsg -bl $LOGFILE -m "emcli set_target_property_value \\ "
+Bmsg -bl $LOGFILE -m " -property_records=\"${TARGET}@oracle_emd@LifeCycle Status@${LCS}\" \\ "
+Bmsg -bl $LOGFILE -m " -property_records=\"${TARGET}@oracle_emd@Department@${DEPT}\" \\ "
+Bmsg -bl $LOGFILE -m " -subseparator=property_records=\"@\""
+Bmsg -bl $LOGFILE -m "emcli sync"
+Bmsg -bl $LOGFILE -m "emcli logout\n"
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Main program - end
+#-----------------------------------------------------------------------------------------------------------------
+Bscriptend -l $LOGFILE
+exit
+

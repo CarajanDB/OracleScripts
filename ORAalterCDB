@@ -1,0 +1,102 @@
+# @(#) ================================================================================================================
+# @(#) File        : ORAalterCDB
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 0.1
+# @(#) Date        : 2020-04-14
+# @(#) Description : Run Scripts in an already created CDB
+# @(#)
+# @@(#)  Change History:
+# @@(#)  Version  Date        Author        Description
+# @@(#)  ------------------------------------------------------------------------------------------------
+# @@(#)  0.1      2020-04-14  J. Ahrends    initial Script
+# @@(#)
+# @(#) ================================================================================================================
+#
+# Set Variable BASEDIR if you want to test / develop
+#
+if [ -z "$BASEDIR" ]
+then
+   BASEDIR=/app/oracle/bin
+fi
+#
+# Read Oracle Library including Logger
+#
+source $BASEDIR/lib/ORAbaselib
+Parameter
+Logger
+
+# =================================================================================================
+#
+# Function Usage
+#
+# Options:
+#    -d  | --database: Databasename
+#          --sql: name of an SQL script or sqlscript-directory
+#          --home: ORACLE_HOME (Default, use newest installed version)
+#
+# =================================================================================================
+
+usage() {
+   logger_info "Usage $0 -d | --database <Databasename> --sql <Directoryname | <scriptname > "
+   logger_info " "
+   logger_info "Example: $0 -d CDB01 -s /app/oracle/admin/sql/alterCDB"
+   exit
+}
+
+
+# =================================================================================================
+#
+# Main
+#
+# Options:
+#    -d  | --database: Databasename
+#          --sql: name of an SQL script or sqlscript-directory
+# =================================================================================================
+
+ReadOptions $*
+RC=$?
+if [ $RC -ne 0 ]
+then
+   usage
+fi
+
+# Check if DBNAME is set
+
+if [ "$DBNAME" = "NONE" ]
+then
+   logger_error "Databasename not set"
+   usage
+fi
+
+if [ "$SQLNAME" = "NONE" ]
+then
+   logger_error "No SQL Script or File set"
+   usage
+fi
+
+InstanceUp $DBNAME
+RET=$?
+if [ "$RET" -ne 1 ]
+then
+   logger_error "Instance $DBNAME is not open"
+   return $RET
+fi
+
+DirExists $SQLNAME
+if [ $? -gt 0 ]
+then
+   RunAllSQL $SQLNAME CDB\$ROOT
+   RET=$?
+else
+   RunSingleSQL $SQLNAME CDB\$ROOT
+   RET=$?
+fi
+
+if [ $RET -gt 0 ]
+then
+   logger_error "Unable to run SQL Script $SQLNAME"
+   exit -1
+else
+   logger_info "Successfully running SQL Script $SQLNAME"
+   exit 0
+fi

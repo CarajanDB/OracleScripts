@@ -1,0 +1,153 @@
+# @(#) ================================================================================================================
+# @(#) Name .........: ORAdelete_img
+# @(#) Autor ........: Thorsten Thiel
+# @(#) Funktion .....: Loeschen aller ungenutzten ORACLE-Installationen
+# @(#) Version  .....: 1.2
+# @(#) Datum ........: 09.04.2021
+# @(#) Format .......: ORAdelete_img
+# @(#) Beispiel .....: ORAdelete_img
+#
+# @@(#) Beschreibung :
+# @@(#)                Das Skript vergleicht die unter /app/oracle/product installierten ORACLE-Versionen mit den in der
+# @@(#)                Datei /etc/oratab aufgefuehrten aktiven (nicht auskommentierten) ORACLE_HOMES. Nicht genutzte ORACLE-
+# @@(#)                Versionen werden vom Rechner entfernt. 11g-Installationen werden nicht beruecksichtigt.
+# @@(#)                Es wird auch die $TNS_ADMIN/listener.ora ueberprueft.
+# @@(#) Aenderungen .:
+# @@(#) 1.0 10.01.2018 thi created
+# @@(#) 1.1 09.10.2018 thi changed function check_lsnrora
+# @@(#) 1.2 09.04.2021 thi changed searching for existing OH
+# @(#) ================================================================================================================
+
+#-----------------------------------------------------------------------------------------------------------------
+#     Global script environment
+#-----------------------------------------------------------------------------------------------------------------
+source /app/oracle/bin/ORAlib
+Logger
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION: detach_home
+#-----------------------------------------------------------------------------------------------------------------
+detach_home()
+{
+if [ ! -s "$ORAINV" ]
+then
+   MESSAGE="file $ORAINV does not exist!"
+   logger_error "$MESSAGE"
+   return
+fi
+ORAINV_LINE=`grep $OH $ORAINV`
+if [ $? -eq 0 ] # OH in Inventory vorhanden
+then
+   echo $ORAINV_LINE|grep REMOVED >/dev/null
+   if [ $? -eq 0 ] # OH schon als REMOVED gekennzeichnet
+   then
+      MESSAGE="ORACLE_HOME $OH in Inventory schon als REMOVED gekennzeichnet"
+      logger_info "$MESSAGE"
+      return
+   else
+      HOME_NAME=`echo $ORAINV_LINE|awk -F\" '{print $2}'`
+      $OH/oui/bin/runInstaller -silent -ignoreSysPreReqs -detachHome ORACLE_HOME=$OH ORACLE_HOME_NAME=$HOME_NAME
+      ORAINV_LINE=`grep $OH $ORAINV`
+      if [ $? -eq 0 ] # OH noch in Inventory vorhanden
+      then
+         echo $ORAINV_LINE|grep REMOVED >/dev/null
+         if [ $? -eq 0 ] # OH als REMOVED gekennzeichnet
+         then
+            MESSAGE="ORACLE_HOME $OH aus Inventory geloescht"
+            logger_info "$MESSAGE"
+            return
+         else
+            MESSAGE="ORACLE_HOME konnte nicht aus Inventory geloescht werden"
+            logger_error "$MESSAGE"
+            return
+         fi
+      else # OH nicht mehr in Inventory vorhanden
+         MESSAGE="ORACLE_HOME $OH aus Inventory geloescht"
+         logger_info "$MESSAGE"
+         return
+      fi
+   fi
+else
+   MESSAGE="kein Eintrag fuer $OH in Inventory!"
+   logger_info "$MESSAGE"
+   return
+fi
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION check listener.ora 
+#-----------------------------------------------------------------------------------------------------------------
+check_lsnrora()
+{
+grep $OH $TNS_ADMIN/listener.ora|grep -v "^#"  >/dev/null
+RC=$?
+return $RC
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+#     FUNCTION usage
+#-----------------------------------------------------------------------------------------------------------------
+function usage()
+{
+cat <<EOCAT
+Alle ungenutzen ORACLE-Installationen werden geloescht!
+
+Das Skript vergleicht die unter /app/oracle/product installierten ORACLE-Versionen mit den in der
+Datei /etc/oratab aufgefuehrten aktiven (nicht auskommentierten) ORACLE_HOMES. Nicht genutzte ORACLE-
+Versionen werden vom Rechner entfernt. 11g-Installationen werden nicht beruecksichtigt.
+Es wird auch die $TNS_ADMIN/listener.ora ueberprueft.
+
+EOCAT
+}
+
+#-----------------------------------------------------------------------------------------------------------------
+# Main
+#-----------------------------------------------------------------------------------------------------------------
+if [ $# -gt 0 ]
+then
+   usage
+   exit
+fi
+PRODDIR='/app/oracle/product/'
+CHECKDOMAIN='barmenia.lan'
+LX_DOMAIN=`hostname -d`
+ORAINV='/app/oraInventory/ContentsXML/inventory.xml'
+REMLIST='/tmp/rem_OH.lst'
+if [ "$LX_DOMAIN" != "$CHECKDOMAIN" ]  # domain != barmenia.lan
+then
+   MESSAGE="Es werden nur Maschinen der Domaene >$CHECKDOMAIN< bearbeitet!
+Maschinen der Domaene >$LX_DOMAIN< bleiben aussen vor!"
+   logger_info "$MESSAGE"
+   exit 1
+else  # domain == barmenia.lan
+#Verzeichnisse unter /app/oracle/product mit Inventory vergleichen
+   for OH in `find $PRODDIR -maxdepth 2 -mindepth 1 -type d|grep '/db'`
+   do
+      echo "OH: $OH"
+      USEDLINES=`grep $OH /etc/oratab|grep -v "^#"|wc -l`
+      if [ $USEDLINES -eq 0 ]
+      then
+         check_lsnrora
+         if [ $? -eq 1 ]
+         then
+            MESSAGE="Verzeichnis >$OH< wird nicht genutzt!"
+            logger_info "$MESSAGE"
+            detach_home
+            rm -rf $OH
+            if [ $? -ne 0 ]
+            then
+               MESSAGE="Verzeichnis >$OH< konnte nicht geloescht werden!"
+               logger_error "$MESSAGE"
+            fi
+         else
+            MESSAGE="Verzeichnis >$OH< wird noch in $TNS_ADMIN/listener.ora genutzt!"
+            logger_info "$MESSAGE"
+            MESSAGE="Verzeichnis >$OH< wird nicht geloescht!"
+            logger_info "$MESSAGE"
+         fi
+      else
+         MESSAGE="ORACLE HOME >$OH< ist in Benutzung!"
+         logger_info "$MESSAGE"
+      fi
+   done
+fi

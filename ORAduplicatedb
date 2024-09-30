@@ -1,0 +1,556 @@
+#!/bin/bash
+## @(#) ================================================================================================================
+## @(#) File        : ORAduplicatedb
+## @(#) Author      : Johannes Ahrends
+## @(#)
+## @(#) Version     : 1.6
+## @(#) Date        : 01.07.2024
+## @(#)
+## @(#) Description : Clone an existing Database (e.g. P to I)
+## @(#)
+## @(#) Syntax      : see usage (ORAduplicate -h)
+## @(#)
+## @(#) Attention   : This script must be started as user ORACLE on the Standby Server
+## @(#)
+## @(#) Presumption :
+## @(#) 1. Oracle software is installed, database exists in /etc/oratab
+## @(#) 2. Unique Name for primary Database is always <DBNAME>_S1 and for Standby <DBNAME>_S2
+## @(#) 3. Environment ORACLE_SID, ORACLE_HOME set correctly
+##
+## @@(#) Change History:
+## @@(#)
+## @@(#) 0.4     26.10.2015 D. Smets   support -tf (Use timestamp file with date format: DD-MM-YYYY HH24:MI:SS
+## @@(#) 0.5     27.10.2015 J. Ahrends spfile Parameter (-i)
+## @@(#) 0.6     02.11.2015 J. Ahrends Query Oracle Version, rman connect check
+## @@(#) 0.7     10.11.2015 J. Ahrends Changes to Passwordfile, Logfile, Directories
+## @@(#) 0.8     10.11.2015 J. Ahrends RMAN with SYS (even Oracle 12c)
+## @@(#) 0.9     12.11.2015 D. Smets   added: Register Database in RMAN Catalog after Duplicate
+## @@(#) 1.0     25.02.2016 J. Ahrends problems with block change tracking, rman duplicate without open
+## @@(#) 1.1     31.05.2016 J. Ahrends Change to ORACLE_SID environment variable, no longer script parameter
+## @@(#) 1.2     21.06.2016 J. Ahrends Create admin directories (mkdir -p)
+## @@(#) 1.3     21.06.2016 J. Ahrends Check Filesystem sizes
+## @@(#) 1.4     25.01.2018 M. Pils    changed pwddir location
+# @@(#)  1.5     09.04.2024 M. Pils    Added "" for Oracle Password
+# @@(#)  1.6     01.07.2024 M. Pils    Added [DATA|FRA]FILEDEST
+## @(#) ================================================================================================================
+#
+#
+# Variables
+#
+SCRIPTDIR=/app/oracle/bin
+DIR=$SCRIPTDIR
+LOCKFILE=$DIR/ORAstandby_db.lck
+DATE=`date +%Y-%m-%d-%H-%M-%S`
+DBNAME=$ORACLE_SID
+ADMINDIR=/app/oracle/admin/$DBNAME
+PWDDIR=/app/oracle/admin/etc/pwddir
+DATAFILEDEST="${DATAFILEDEST:-/app/oracle/data}"
+FRAFILEDEST="${FRAFILEDEST:-/app/oracle/fra}"
+
+#
+# Lockfile must not exist otherwise script won't start
+#
+LOCKFILE=$SCRIPTDIR/ORAduplicatedb.lck
+#
+
+DATE=`date +"%d%m%Y"`
+#
+# Default Return Code
+#
+RT=0
+RMANCMD=rmandup.rcv
+DBDEL=0
+BLACKOUT=0
+SPFILE=0
+#-----------------------------------------------------------------------
+#
+#Functions
+#
+#-----------------------------------------------------------------------
+#
+#-----------------------------------------------------------------------
+# Usage help
+#-----------------------------------------------------------------------
+#
+usage() {
+   echo "Usage:  $0 -d [-p sourcedbuname] [-n nboraclient] [-t Date Time] [-tf timestampfile] [-h] [-b] [-i]"
+   echo "   -d:  Drop existing Database (Default: do not delete)"
+   echo "   -b:  Set Blackouts"
+   echo "   -p:  Unique Name of Source Database"
+   echo "   -n:  Netbackup Client"
+   echo "   -t:  Timestamp Format DD-MM-YYYY HH24:MI:SS"
+   echo "   -i:  Create New spfile"
+   echo "   -tf: Timestamp Filename (-t will overwrite)"
+   echo "   -h:  This help"
+}
+#
+#-----------------------------------------------------------------------
+# Logger Script
+#-----------------------------------------------------------------------
+#
+logger() {
+if [ -r $SCRIPTDIR/log4sh ]
+then
+   LOCALLOGGER="`basename $0 | cut -d"." -f 1`_log4sh.properties"
+   if [ -r $SCRIPTDIR/${LOCALLOGGER} ]
+   then
+      LOG4SH_CONFIGURATION=$SCRIPTDIR/$LOCALLOGGER . $SCRIPTDIR/log4sh
+   else
+      LOG4SH_CONFIGURATION=$SCRIPTDIR/log4sh.properties . $SCRIPTDIR/log4sh
+   fi
+else
+   echo "ERROR: could not load (log4sh)" >&2
+   exit 1
+fi
+#  echo "LOG4SH_CONFIGURATION:$LOG4SH_CONFIGURATION"
+}
+
+#
+#-----------------------------------------------------------------------
+# Check that filesystem sizes are sufficient
+#-----------------------------------------------------------------------
+#
+checkFSize()
+{
+    DATADIR="$DATAFILEDEST/$CLONEDBUNAME"
+    FRADIR="$FRAFILEDEST/$CLONEDBUNAME"
+    DATASIZE=`df -m | grep ${DATADIR} | awk '{ print $3 }'`
+    FRASIZE=`df -m | grep ${FRADIR} | awk '{ print $3 }'`
+    logger_info "Datadir ${DATADIR} Size = ${DATASIZE}"
+    logger_info "Fradir ${FRADIR} Size = ${FRASIZE}"
+#
+# Check size of source database
+#
+    DBSIZE=$(sqlplus -s /nolog <<EOSQL
+connect sys/"${sysPW}"@${SOURCEDBUNAME} AS sysdba
+set heading off
+set trimspool on
+set pages 0
+column MB format 9999990
+  SELECT sum (mb) FROM (
+     SELECT round(sum(bytes/1024/1024)) mb FROM dba_data_files
+     UNION ALL
+     SELECT round(sum(bytes/1024/1024)) mb FROM v\$log);
+EOSQL
+)
+   logger_info "DBSIZE = $DBSIZE"
+   if [ $DBSIZE -gt $DATASIZE ]
+   then
+      logger_fatal "Insufficient Space ($DBSIZE needed, $DATASIZE available)"
+      exit 11
+   fi
+
+}
+#
+#-----------------------------------------------------------------------
+# Delete Database
+#-----------------------------------------------------------------------
+#
+createDirs() {
+   mkdir -p $ADMINDIR/pfile
+   mkdir -p $ADMINDIR/adump
+   mkdir -p $ADMINDIR/dpdump
+   mkdir -p $ADMINDIR/scripts
+}
+#
+#-----------------------------------------------------------------------
+# Delete Database
+#-----------------------------------------------------------------------
+#
+deleteDB() {
+   if [ `echo $ORACLE_SID|rev|cut -c1` == 'P' ]
+   then
+      logger_error "Cannot drop Production Database - not allowed"
+      RT=2
+   else
+      logger_info "Drop Database ${ORACLE_SID}"
+      COMMAND=$(sqlplus -s / as sysdba <<EOSQL
+        WHENEVER SQLERROR EXIT SQL.SQLCODE
+        shutdown abort
+        startup mount
+        ALTER SYSTEM ENABLE RESTRICTED SESSION;
+        DROP DATABASE;
+EOSQL
+)
+   fi
+   logger_debug "COMMAND=${COMMAND}"
+   if [ $VERSION -eq 12 ]
+   then
+      if [ "`echo $COMMAND |grep -c "Database dropped"`" -ne 1 ]
+      then
+         logger_error "Unable to drop database"
+         logger_error "$COMMAND"
+         RT=3
+      else
+         logger_info "Drop Database Successful"
+         RT=0
+      fi
+   else
+      if [ "`echo $COMMAND |grep -c "ORA-01034: ORACLE not available"`" -ne 1 ]
+      then
+         logger_error "Unable to drop database"
+         logger_error "$COMMAND"
+         RT=3
+      else
+         logger_info "Drop database successful"
+         RT=0
+      fi
+   fi
+   return $RT
+}
+#
+#-----------------------------------------------------------------------
+# Read Password from file
+#-----------------------------------------------------------------------
+#
+readPWD() {
+   logger_debug "SYS Passwort"
+   if [ -f $PWDDIR/.pwdfile_db_sys ]
+   then
+      typeset -l ORACLE_SID_LC=$SOURCEDB
+      source $PWDDIR/.pwdfile_db_sys
+      sysPW=$PWDSYS
+      logger_debug "Password = ${sysPW}"
+   else
+      logger_error "No SYS Passwordfile"
+      RT=10
+   fi
+   return $RT
+}
+#
+#-----------------------------------------------------------------------
+# Check connect to source database
+#-----------------------------------------------------------------------
+#
+checkRMAN () {
+   logger_debug "Testconnection"
+   RMANCONNECT="connect target 'sys/${sysPW}@${SOURCEDBUNAME}'"
+   logger_debug RMANCONNECT="$RMANCONNECT"
+
+   CONNECT=$(rman <<EORMAN
+   $RMANCONNECT
+EORMAN
+)
+   logger_debug $CONNECT
+   if [ `echo $CONNECT | grep -c "connected to target database:"` -eq 1 ]
+   then
+      logger_debug "RMAN Test Connection successful"
+      RT=0
+   else
+      logger_error "Unable to connect to source database ${SOURCEDBUNAME}"
+      RT=11
+   fi
+   return $RT
+}
+#
+#-----------------------------------------------------------------------
+# Create Dummy init.ora
+#-----------------------------------------------------------------------
+#
+createPfile()
+{
+   logger_info Create file ${ADMINDIR}/pfile/init${DBNAME}_dup.ora
+   VERSION=`$ORACLE_HOME/OPatch/opatch lsinventory |awk '/^Oracle Database/ { print $NF}' | cut -d"." -f1-4`
+   cat <<EOORA > ${ADMINDIR}/pfile/init${DBNAME}_dup.ora
+*.audit_file_dest='$ADMINDIR/adump'
+*.audit_trail='DB'
+*.compatible='$VERSION'
+*.db_block_size=8192
+*.db_create_file_dest='${DATAFILEDEST}'
+*.db_domain='unix.lan'
+*.db_name='${DBNAME}'
+*.db_recovery_file_dest='${FRAFILEDEST}'
+*.db_recovery_file_dest_size=8388608000
+*.db_unique_name='${CLONEDBUNAME}'
+*.diagnostic_dest='/app/oracle'
+*.log_archive_format='%t_%s_%r.arc'
+*.local_listener='LISTENER_${DBNAME}'
+*.open_cursors=1000
+*.pga_aggregate_target=512M
+*.processes=1000
+*.remote_login_passwordfile='EXCLUSIVE'
+*.sga_target=1500M
+*.undo_tablespace='UNDOTBS1'
+EOORA
+}
+
+#
+#-----------------------------------------------------------------------
+# Starten clone database with dummy pfile
+#-----------------------------------------------------------------------
+#
+startInstance() {
+
+   EXISTS=$(sqlplus -s / as sysdba <<EOSQL
+      SELECT open_mode FROM v\$database;
+EOSQL
+)
+   if [ `echo $EXISTS |grep -c ORA-01507` -eq 1 ]
+   then
+      sqlplus -s / as sysdba <<EOSQL
+      shutdown abort;
+EOSQL
+   fi
+#
+# Create new spfile if option -p is used
+#
+   if [ ${SPFILE} -eq 1 ]
+   then
+      createPfile
+      logger_info "Create New spfile"
+   COMMAND=$(sqlplus -s / as sysdba <<EOSQL
+      startup nomount pfile='${ADMINDIR}/pfile/init${DBNAME}_dup.ora';
+      exit;
+EOSQL
+)
+   else
+   COMMAND=$(sqlplus -s / as sysdba <<EOSQL
+      startup nomount;
+      exit;
+EOSQL
+)
+   fi
+   logger_debug "COMMAND=${COMMAND}"
+
+   if [ `echo $COMMAND | grep -c "instance started"` -ne 1 ]
+   then
+      logger_error $RETURNSTRING
+      RT=3
+   else
+      logger_info "Instance started"
+      RT=0
+   fi
+   return $RT
+}
+#
+#-----------------------------------------------------------------------
+# Duplicate Database mit RMAN
+#-----------------------------------------------------------------------
+#
+duplicateDB() {
+   logger_info "Starting RMAN Duplication"
+   cat <<EOCAT >${RMANCMD}
+   connect auxiliary /
+   $RMANCONNECT
+   run {
+         ALLOCATE AUXILIARY CHANNEL aux1 DEVICE TYPE SBT_TAPE PARMS='ENV=(NB_ORA_SERV=nbu1,NB_ORA_CLIENT=${NBORACLIENT})';
+         ALLOCATE AUXILIARY CHANNEL aux2 DEVICE TYPE SBT_TAPE PARMS='ENV=(NB_ORA_SERV=nbu1,NB_ORA_CLIENT=${NBORACLIENT})';
+         duplicate target DATABASE to '${ORACLE_SID}' NOFILENAMECHECK until time "to_date('$ZEITPUNKT', 'dd-mm-yyyy hh24:mi:ss')" NOOPEN;
+   }
+EOCAT
+   cat ${RMANCMD} | logger_debug
+   RT=$(rman cmdfile=$RMANCMD | logger_debug; echo $? )
+   logger_debug "RMAN Duplicate ReturnCode=$RT"
+   return $RT
+}
+#
+# Register Database in Recovery Catalog
+#
+registerDB() {
+   logger_info "Start Register DB in RMAN Catalog"
+   cat <<EOCAT >${RMANCMD}
+   register database;
+EOCAT
+   cat ${RMANCMD} | logger_debug
+   RT=$(rman target / catalog rman/rman@rcvcat cmdfile=$RMANCMD | logger_debug; echo $? )
+   logger_debug "Register Database ReturnCode=$RT"
+   return $RT
+}
+
+#################################
+#
+# Main
+#
+#################################
+
+logger
+logger_info "Command=$0 $*"
+
+if [ $# -eq 0 ]
+then
+   usage
+   exit
+fi
+#
+# Parameter einlesen
+#
+while [ $# -gt 0 ]
+do
+   option="$1"
+   case $option in
+      -d)
+         DBDEL=1
+         ;;
+      -b)
+         BLACKOUT=1
+         ;;
+      -p)
+         SOURCEDBUNAME="$2"
+         shift
+         ;;
+      -n)
+         NBORACLIENT="$2"
+         shift
+         ;;
+      -tf)
+         ZEITPUNKT_FILE="$2"
+         ZEITPUNKT=`cat ${ZEITPUNKT_FILE}`
+         shift
+         ;;
+      -t)
+         ZEITPUNKT="$2 $3"
+         shift
+         ;;
+      -i)
+         SPFILE=1
+         ;;
+      -h)
+         usage
+         exit
+         ;;
+   esac
+   shift
+done
+#
+# ======= CHECKS ========
+#
+logger_debug NBORACLIENT=$NBORACLIENT
+CLONEDB=$ORACLE_SID
+if [ -z "$ORACLE_SID" ]
+then
+   logger_fatal "Variable ORACLE_SID not set!"
+   exit 1
+fi
+
+logger_debug SOURCEDBUNAME=$SOURCEDBUNAME
+if [ `echo $SOURCEDBUNAME |rev |cut -c2-3| rev` == '_S' ]
+then
+   SITE=`echo $SOURCEDBUNAME | cut -d_ -f2`
+   SOURCEDB=`echo $SOURCEDBUNAME |rev |cut -c4-|rev`
+   CLONEUNAMEDB=${CLONEDB}_${SITE}
+else
+   SOURCEDB=$SOURCEDBUNAME
+   CLONEDBUNAME=$CLONEDB
+fi
+logger_debug SOURCEDB=$SOURCEDB
+logger_debug SOURCEDBUNAME=$SOURCEDBUNAME
+logger_debug CLONEDB=$CLONEDB
+logger_debug CLONEDBUNAME=$CLONEDBUNAME
+
+if [ -z "$NBORACLIENT" -o -z "$SOURCEDB" -o -z "$CLONEDB" ]
+then
+   usage
+   exit
+fi
+#
+if [ -f "$LOCKFILE" ]
+then
+   logger_error "Unable to start action $0"
+   logger_error "Lockfile ${LOCKFILE} exists"
+   logger_error "delete lockfile $LOCKFILE"
+   exit
+fi
+#
+# ===== Doing =====
+#
+touch ${LOCKFILE}
+#
+# Read Password
+#
+readPWD
+if [ $? -ne 0 ]
+then
+   logger_error "Error reading Password file"
+   exit 10
+fi
+#
+#
+# Check Filesystem sizes
+checkFSize
+#
+#
+# Create Admin Directories
+#
+createDirs
+
+logger_info "CloneDB $ORACLE_SID to `hostname` on $DATE"
+#
+# Get Oracle Version
+#
+VERSION=`$ORACLE_HOME/OPatch/opatch lsinventory |awk '/^Oracle Database/ { print $NF}' | cut -d"." -f1`
+#
+# Check RMAN connect
+#
+RMANCONNECT=""
+checkRMAN
+if [ $? -ne 0 ]
+then
+   logger_error "RMANCONNECT=${RMANCONNECT}"
+   logger_error "RMAN unable to connect to source database $SOURCEDBUNAME"
+   exit 11
+fi
+logger_debug "RMANCONNECT=$RMANCONNECT"
+#
+#
+# Set Blackout
+#
+if [ "$BLACKOUT" -eq 1 ]
+then
+   ORAblackout -o start -d $CLONEDB | logger_info
+fi
+#
+# Delete "old" Database
+#
+if [ "$DBDEL" -eq 1 ]
+then
+   deleteDB
+
+   if [ $? -ne 0 ]
+   then
+      logger_error "Error deleting database"
+      exit 1
+   fi
+fi
+#
+# Start Instance with dummy spfile
+#
+startInstance
+if [ $? -ne 0 ]
+then
+   logger_error "Error starting database"
+   exit 2
+fi
+#
+# Duplicate Database
+#
+duplicateDB
+if [ $? -ne 0 ]
+then
+   logger_error "Error duplicating database"
+   exit 3
+fi
+#
+# Blackout End
+#
+if [ "$BLACKOUT" -eq 1 ]
+then
+   ORAblackout -o stop -d $CLONEDB | logger_info
+fi
+#
+# Register Database in Recovery Catalog
+#
+registerDB
+if [ $? -ne 0 ]
+then
+   logger_error "Error register database with rman catalog"
+   exit 3
+fi
+#
+# Cleanup
+#
+rm ${RMANCMD}
+rm ${LOCKFILE}
+
+logger_info "Database in Mount"
+logger_info "Needs to be opened with reset logs"
+logger_info "ALTER DATABASE OPEN RESETLOGS"
