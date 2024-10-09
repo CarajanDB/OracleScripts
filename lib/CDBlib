@@ -27,7 +27,8 @@
 #############################################################################################
 
 function Parameter() {
-  SCRIPTdir=/mnt/devk_vu23/scripts
+  logger_debug "--> $FUNCNAME"
+  logger_debug "<-- $FUNCNAME $RC"
 }
 
 # =================================================================================================
@@ -37,11 +38,11 @@ function Parameter() {
 # =================================================================================================
 
 log_header() {
-   WHAT=$SCRIPTDIR/what
-   SCRIPTNAME=$(basename $0)
-   SCRIPTPATH=$(dirname $0)
-   SCRIPTVERSION="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep '# @(#) Version'|awk '{print $3,$4,$5}'`"
-   SCRIPTDATE="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep '# @(#) Datum'|awk '{print $3,$4,$5}'`"
+   WHAT=$BINDIR/what
+   local SCRIPTNAME=$(basename $0)
+   local SCRIPTPATH=$(dirname $0)
+   local SCRIPTVERSION="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep '# @(#) Version'|awk '{print $3,$4,$5}'`"
+   local SCRIPTDATE="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep '# @(#) Datum'|awk '{print $3,$4,$5}'`"
    logger_info "$SCRIPTNAME gestartet"
    logger_info "$SCRIPTNAME $*"
    logger_info "$SCRIPTVERSION"
@@ -61,11 +62,10 @@ function Logger () {
   local REINIT=${2:-0}    # Set it to 1 if you run Logger() again in same shell
   if [ -n "$COLORLOG" ]
   then
-    LOG4SH=$SCRIPTDIR/log4shcolor
+    LOG4SH=$LIBDIR/log4shcolor
   else
-    LOG4SH=$SCRIPTDIR/log4sh
+    LOG4SH=$LIBDIR/log4sh
   fi
-echo $LOG4SH
   VARIABLE=''
   if [ $# -gt 0 ]
   then

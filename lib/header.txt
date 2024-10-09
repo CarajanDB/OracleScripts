@@ -1,0 +1,87 @@
+# @(#) ============================================================================================
+# @(#) Filename    : <SCRIPTNAME>
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.0
+# @(#) Date        : <DATUM>
+# @(#) Description : <DESCRIPTION>
+# @(#)
+# @@(#)  Change History:
+# @(#)
+# @@(#)  Version Date         Author      Description
+# @@(#)  ------------------------------------------------------------------------------------------
+# @@(#)  1.0     <DATUM>   jahrends   initial File
+# @(#) ============================================================================================
+
+BASEDIR="$BASEDIR:-/home/oracle"
+CUSTOMERLIB="${BASEDIR}/lib/CUSTOMERLIB"
+source $CUSTOMERLIB
+
+# =================================================================================================
+#
+# Function Usage
+#
+# =================================================================================================
+
+usage() {
+  logger_info ""
+  logger_info "  Command     : <SCRIPTNAME>"
+  logger_info "  Description : $SCRIPTSHORTDESC"
+  logger_info ""
+  logger_info "  Parameters  :"
+  logger_info "                -h | --help               help screen"
+  logger_info ""
+  logger_info "  Example     : <SCRIPTNAME>
+  logger_info ""
+  logger_info "  Attention   : This script must be started as user ORACLE"
+  logger_info ""
+}
+
+# =================================================================================================
+#
+# Read Script Options (getopt)
+#
+# Define Options
+#
+#  SHORT --> short option (e.g. -d)
+#  LONG --> long option (e.g. --database)
+#  : means that a second argument is required
+#
+# Return Values
+#   0 : Successful
+#  10 : Unsuccessful
+#  11 : Invalid Argument
+#
+# =================================================================================================
+
+ReadOptions() {
+  logger_debug "--> Function $FUNCNAME"
+  if [ $# -eq 0 ]
+  then
+    logger_fatal "Arguments required"
+    return 10
+  fi
+  SHORT="h"
+  LONG="help"
+  logger_debug "LONG=$LONG"
+  logger_debug "Arguments=$*"
+  OPTIONS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@" 2>/dev/null)
+  RC=$?
+  logger_debug "OPTIONS=$OPTIONS"
+  if [ "$RC" -ne 0 ]
+  then
+    logger_fatal "Invalid Arguments"
+    return 11
+  fi
+
+  eval set -- $OPTIONS
+  while true
+  do
+    case $1 in
+      -h|--help)        usage
+                        shift;;
+      --)               shift;break;;
+    esac
+  done
+  logger_debug "<-- Function $FUNCNAME"
+  return 0
+}

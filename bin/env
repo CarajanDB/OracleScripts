@@ -1,0 +1,2 @@
+BASEDIR=/home/oracle/johannes/OracleScripts
+export BASEDIR

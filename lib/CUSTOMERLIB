@@ -1,0 +1,21 @@
+# @(#) ============================================================================================
+# @(#) Filename    : CUSTOMERLIB
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.0
+# @(#) Date        : 2024-10-09
+# @(#) Description : Customerspecific Parameters
+# @(#)
+# @@(#)  Change History:
+# @(#)
+# @@(#)  Version Date         Author      Description
+# @@(#)  ------------------------------------------------------------------------------------------
+# @@(#)  1.0     2024-10-09   jahrends   initial File
+# @(#) ============================================================================================
+
+BINDIR=${BASEDIR}/bin
+LIBDIR=${BASEDIR}/lib
+ETCDIR=${BASEDIR}/etc
+LOGDIR=${BASEDIR}/log
+TMPDIR=${BASEDIR}/tmp
+
+source ${LIBDIR}/CDBlib

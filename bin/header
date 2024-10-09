@@ -1,0 +1,153 @@
+# @(#) Filename    : header
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.0
+# @(#) Date        : 2024-10-09
+# @(#) Description : Script to create or modify the header Information of a script
+# @(#)
+# @(#)
+# @@(#)  Change History:
+# @@(#)  Version  Date       Author      Description
+# @@(#)  ------------------------------------------------------------------------------------------
+# @@(#)  1.0     2024-10-09  jahrends   initial File
+# @(#) ============================================================================================
+
+BASEDIR="${BASEDIR:-/home/oracle}"
+CUSTOMERLIB="${BASEDIR}/lib/CUSTOMERLIB"
+source $CUSTOMERLIB
+
+# =================================================================================================
+#
+# Function Usage
+#
+# =================================================================================================
+usage() {
+  echo ""
+  echo "  Command     : header"
+  echo "  Description : create files with corporate header and add version to header"
+  echo ""
+  echo "  Parameters  :"
+  echo "                -h help screen"
+  echo "                -s name of file / script"
+  echo "                -a Author"
+  echo "                -m text for version history"
+  echo "                -n create new major version"
+  echo ""
+  echo "  Example     : header -s scriptname -a jahrends -m \"New Version\""
+  echo ""
+  exit $1
+}
+
+# ============================================================================================
+# 
+#  Date
+# 
+# ============================================================================================
+
+Datum() {
+  local STRING='# @(#) Date'
+#  echo l$STRING
+  OLDDATE=`grep "$STRING" $SCRIPTNAME |rev|cut -d' ' -f1|rev`
+#  echo $OLDDATE
+}
+
+# ============================================================================================
+# 
+#  Version
+# 
+# ============================================================================================
+
+Version() {
+  local STRING='# @(#) Version'
+  OLDVERSION=`grep "$STRING" $SCRIPTNAME |rev|cut -d" " -f1|rev`
+  local MAJORVERSION=`echo $OLDVERSION |cut -d . -f1`
+  local MINORVERSION=`echo $OLDVERSION |cut -d . -f2`
+#  echo $OLDVERSION
+#  echo $MAJORVERSION
+#  echo $MINORVERSION
+  if [ -n "$NEWMAJOR" ]
+  then
+    MAJORVERSION=`expr $MAJORVERSION + 1`
+    MINORVERSION=0
+  else
+    MINORVERSION=`expr $MINORVERSION + 1`
+  fi
+  NEWVERSION=`echo ${MAJORVERSION}.${MINORVERSION}`
+#  echo $NEWVERSION
+}
+
+# ============================================================================================
+# 
+#  Main
+# 
+# ============================================================================================
+
+# Read input parameter
+
+if [ $# -eq 0 ]
+then
+  echo "Arguments required"
+  header 10
+fi
+
+OPTIONS="hna:m:s:"
+
+while getopts "$OPTIONS" opt
+do
+  case $opt in
+    s)      SCRIPTNAME=$OPTARG;;
+    a)      AUTHOR=$OPTARG;;
+    m)      MESSAGE=$OPTARG;;
+    n)      NEWMAJOR=1;;
+    h)      usage 0;;
+    *)      ;;
+  esac
+done
+#echo SCRIPTNAME=$SCRIPTNAME
+#echo AUTHOR=$AUTHOR
+#echo MESSAGE=$MESSAGE
+
+HEUTE=`date +%Y-%m-%d`
+if [ -z "$SCRIPTNAME" ]
+then
+  echo "Please specifiy scriptname"
+  usage 1
+fi
+
+if [ ! -s "$SCRIPTNAME" ]
+then
+  cat ${LIBDIR}/header.txt > $SCRIPTNAME
+  sed -i "s/<SCRIPTNAME>/$SCRIPTNAME/g" $SCRIPTNAME
+  sed -i "s/<DATUM>/$HEUTE/g" $SCRIPTNAME
+  sed -i "s/<DESCRIPTION>/$MESSAGE/g" $SCRIPTNAME
+  echo "File $SCRIPTNAME created"
+  exit 0
+fi  
+#
+# Change Version
+#
+Version
+
+OLDSTRING=`grep "# @(#) Version" $SCRIPTNAME`
+# echo $OLDSTRING
+NEWSTRING=`echo "$OLDSTRING" |sed "s/$OLDVERSION/$NEWVERSION"/`
+#echo $OLDSTRING
+#echo $NEWSTRING
+sed -i "s/${OLDSTRING}/${NEWSTRING}/" $SCRIPTNAME
+#
+# Change Datum
+#
+Datum
+#echo Y$OLDDATE
+OLDSTRING=`grep "# @(#) Date" $SCRIPTNAME`
+#echo $OLDSTRING
+NEWSTRING=`echo "$OLDSTRING" |sed "s/$OLDDATE/$HEUTE"/`
+sed -i "s/${OLDSTRING}/${NEWSTRING}/" $SCRIPTNAME
+#
+# Add History line
+#
+LINE=`grep -n "# @(#) ===========" $SCRIPTNAME|tail -1 |cut -d: -f1`
+STRING="# @@(#)  $NEWVERSION     $HEUTE  $AUTHOR    $MESSAGE"
+sed -i "${LINE}i ${STRING}" $SCRIPTNAME
+ 
+echo "added Versioninfo $STRING to $SCRIPTNAME"
+exit 0
