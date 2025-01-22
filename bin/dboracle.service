@@ -1,0 +1,15 @@
+[Unit]
+Description=Der Oracle Database Service
+After=syslog.target network.target
+
+[Service]
+
+RemainAfterExit=yes
+User=oracle
+Group=oinstall
+Restart=no
+ExecStart=/bin/bash -c '/usr/local/bin/dbstart'
+ExecStop=/bin/bash -c '//usr/local/bin/dbstop'
+
+[Install]
+WantedBy=multi-user.target

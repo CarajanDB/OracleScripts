@@ -1,0 +1,73 @@
+#
+# Start der Datenbanken und des Listeners
+#
+ORACLE_BASE=/u01/app/oracle
+LOGDIR=${ORACLE_BASE}/admin/log
+DATUM=`date +%y%m%d`
+mkdir -p $LOGDIR
+#
+# Ermitteln der listener Version 
+# es sollte immer der listener mit der neuesten Version gestartet werden
+#
+getListenerVersion() {
+  MAJORVERSION=0
+  MINORVERSION=0
+  unset LISTENERHOME
+  for myoraversion in `find $ORACLE_BASE -name oraversion -print`
+  do
+    myversion=`$myoraversion -compositeVersion`
+    tmpmajorversion=`echo $myversion |awk -F. '{ print $1 }'`
+    tmpminorversion=`echo $myversion |awk -F. '{ print $2 }'`
+    if [ "$tmpmajorversion" -gt "$MAJORVERSION" ]
+    then
+      MAJORVERSION=$tmpmajorversion
+      MINORVERSION=$tmpminorversion
+      tmplistenerbin=$myoraversion
+    fi
+    if [ "$tmpmajorversion" -eq "$MAJORVERSION" -a "$tmpminorversion" -gt "$MINORVERSION" ]
+    then
+      MINORVERSION=$tmpminorversion
+      LISTENERHOME=`echo $myoraversion`
+      tmplistenerbin=$myoraversion
+    fi
+  done
+  LISTENERHOME=`dirname $tmplistenerbin |rev|cut -d/ -f2-|rev`
+  return 0
+}
+#
+# Start Database
+#
+startInstances() {
+  tmporasid=$ORACLE_SID
+  tmporahome=$ORACLE_HOME
+  ORAENV_ASK=NO
+  for myinstance in `grep -e ":Y$" /etc/oratab`
+  do
+    ORACLE_SID=`echo $myinstance | cut -d: -f1`
+    if [ `ps -ef|grep -v grep | grep -c ora_pmon_${ORACLE_SID}` -eq 0 ]
+    then
+      echo "`date +%y-%m-%d_%H:%M:%S` Starting Databaseinstance $ORACLE_SID" >> ${LOGDIR}/dbstart_${DATUM}.log
+#      echo $ORACLE_SID
+      . oraenv -s
+      sqlplus / as sysdba <<EOSQL >> ${LOGDIR}/dbstart_${DATUM}.log  2>&1  &
+startup
+EOSQL
+    fi
+  done
+  unset ORAENV_ASK
+}
+#
+# Main
+#
+#
+# Start listener if not running
+#
+if [ `ps -ef | grep -v grep |grep -c tnslsnr` -eq 0 ]
+then
+  getListenerVersion
+  export ORACLE_HOME=$LISTENERHOME
+  echo "`date +%y-%m-%d_%H:%M:%S` starting listener" >> dbstart_${DATUM}.log
+  ${LISTENERHOME}/bin/lsnrctl start >> ${LOGDIR}/dbstart_${DATUM}.log 2>&1
+fi
+
+startInstances

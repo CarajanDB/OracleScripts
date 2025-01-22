@@ -1,0 +1,74 @@
+#
+# Stop der Datenbanken und des Listeners
+#
+ORACLE_BASE=/u01/app/oracle
+LOGDIR=${ORACLE_BASE}/admin/log
+DATUM=`date +%y%m%d`
+mkdir -p $LOGDIR
+#
+# Ermitteln der listener Version 
+# es sollte immer der listener mit der neuesten Version gestartet werden
+#
+getListenerVersion() {
+  MAJORVERSION=0
+  MINORVERSION=0
+  unset LISTENERHOME
+  for myoraversion in `find $ORACLE_BASE -name oraversion -print`
+  do
+    myversion=`$myoraversion -compositeVersion`
+    tmpmajorversion=`echo $myversion |awk -F. '{ print $1 }'`
+    tmpminorversion=`echo $myversion |awk -F. '{ print $2 }'`
+    if [ "$tmpmajorversion" -gt "$MAJORVERSION" ]
+    then
+      MAJORVERSION=$tmpmajorversion
+      MINORVERSION=$tmpminorversion
+      tmplistenerbin=$myoraversion
+    fi
+    if [ "$tmpmajorversion" -eq "$MAJORVERSION" -a "$tmpminorversion" -gt "$MINORVERSION" ]
+    then
+      MINORVERSION=$tmpminorversion
+      LISTENERHOME=`echo $myoraversion`
+      tmplistenerbin=$myoraversion
+    fi
+  done
+#  echo MAJOR=$MAJORVERSION
+#  echo MINOR=$MINORVERSION
+  LISTENERHOME=`dirname $tmplistenerbin|rev|cut -d/ -f2-|rev`
+#  echo $LISTENERBIN
+  return 0
+}
+#
+# Stop Database
+#
+stopInstances() {
+  tmporasid=$ORACLE_SID
+  tmporahome=$ORACLE_HOME
+  ORAENV_ASK=NO
+  for myinstance in `ps -ef |grep -v grep |grep ora_pmon | awk -F_ '{ print $3 }'` 
+  do
+#    ORACLE_SID=`echo $myinstance | awk -F_ '{ print $3 }'`
+    ORACLE_SID=$myinstance
+    echo "`date +%y-%m-%d_%H:%M:%S` Starting Databaseinstance $ORACLE_SID" >> ${LOGDIR}/dbstop_${DATUM}.log
+    echo $ORACLE_SID
+    . oraenv -s
+    $ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOSQL >> ${LOGDIR}/dbstop_${DATUM}.log  2>&1
+shutdown immediate
+EOSQL
+  done
+unset ORAENV_ASK
+}
+#
+# Main
+#
+#
+# Stop listener if running
+#
+if [ `ps -ef | grep -v grep |grep -c tnslsnr` -eq 1 ]
+then
+  getListenerVersion
+  ORACLE_HOME=$LISTENERHOME
+  echo "`date +%y-%m-%d_%H:%M:%S` stopping listener" >> dbstop_${DATUM}.log
+  $LISTENERHOME/bin/lsnrctl stop >> ${LOGDIR}/dbstop_${DATUM}.log 2>&1
+fi
+
+stopInstances
