@@ -1,14 +1,27 @@
-#
-# Start der Datenbanken und des Listeners
-#
+# @(#) ============================================================================================
+# @(#) Filename    : dbstart
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.0
+# @(#) Date        : 2025-01-22
+# @(#) Description : Start listener and Databases (if Flag is set in /etc/oratab)
+# @(#)
+# @@(#)  Change History:
+# @(#)
+# @@(#)  Version Date         Author      Description
+# @@(#)  ------------------------------------------------------------------------------------------
+# @@(#)  1.0     2025-01-22   jahrends   initial File
+# @(#) ============================================================================================
+
 ORACLE_BASE=/u01/app/oracle
 LOGDIR=${ORACLE_BASE}/admin/log
 DATUM=`date +%y%m%d`
 mkdir -p $LOGDIR
+#############################################################################################
 #
 # Ermitteln der listener Version 
 # es sollte immer der listener mit der neuesten Version gestartet werden
 #
+#############################################################################################
 getListenerVersion() {
   MAJORVERSION=0
   MINORVERSION=0
@@ -34,9 +47,11 @@ getListenerVersion() {
   LISTENERHOME=`dirname $tmplistenerbin |rev|cut -d/ -f2-|rev`
   return 0
 }
+#############################################################################################
 #
 # Start Database
 #
+#############################################################################################
 startInstances() {
   tmporasid=$ORACLE_SID
   tmporahome=$ORACLE_HOME
@@ -56,9 +71,11 @@ EOSQL
   done
   unset ORAENV_ASK
 }
+#############################################################################################
 #
 # Main
 #
+#############################################################################################
 #
 # Start listener if not running
 #
@@ -71,3 +88,4 @@ then
 fi
 
 startInstances
+exit 0

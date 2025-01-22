@@ -1,14 +1,27 @@
-#
-# Stop der Datenbanken und des Listeners
-#
+# @(#) ============================================================================================
+# @(#) Filename    : dbstop
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.0
+# @(#) Date        : 2025-01-22
+# @(#) Description : Stop listener and Databases (if Flag is set in /etc/oratab)
+# @(#)
+# @@(#)  Change History:
+# @(#)
+# @@(#)  Version Date         Author      Description
+# @@(#)  ------------------------------------------------------------------------------------------
+# @@(#)  1.0     2025-01-22   jahrends   initial File
+# @(#) ============================================================================================
+
 ORACLE_BASE=/u01/app/oracle
 LOGDIR=${ORACLE_BASE}/admin/log
 DATUM=`date +%y%m%d`
 mkdir -p $LOGDIR
+#############################################################################################
 #
 # Ermitteln der listener Version 
 # es sollte immer der listener mit der neuesten Version gestartet werden
 #
+#############################################################################################
 getListenerVersion() {
   MAJORVERSION=0
   MINORVERSION=0
@@ -37,9 +50,11 @@ getListenerVersion() {
 #  echo $LISTENERBIN
   return 0
 }
+#############################################################################################
 #
 # Stop Database
 #
+#############################################################################################
 stopInstances() {
   tmporasid=$ORACLE_SID
   tmporahome=$ORACLE_HOME
@@ -57,10 +72,12 @@ EOSQL
   done
 unset ORAENV_ASK
 }
+#############################################################################################
 #
 # Main
 #
 #
+#############################################################################################
 # Stop listener if running
 #
 if [ `ps -ef | grep -v grep |grep -c tnslsnr` -eq 1 ]

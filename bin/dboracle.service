@@ -1,3 +1,21 @@
+# @(#) ============================================================================================
+# @(#) Filename    : oracle.service
+# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version     : 1.0
+# @(#) Date        : 2025-01-22
+# @(#) Description : systemctl service
+# @(#) Usage       : cp oracle.service /lib/systemd/system
+# @(#)               systemctl daemon-reload
+# @(#)               systemctl enable dboracle.service
+# @(#)               systemctl start dboracle.service
+# @(#)
+# @@(#)  Change History:
+# @(#)
+# @@(#)  Version Date         Author      Description
+# @@(#)  ------------------------------------------------------------------------------------------
+# @@(#)  1.0     2025-01-22   jahrends   initial File
+# @(#) ============================================================================================
+
 [Unit]
 Description=Der Oracle Database Service
 After=syslog.target network.target
