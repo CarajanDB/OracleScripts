@@ -1,2 +1,6 @@
-BASEDIR=/home/oracle/johannes/OracleScripts
-export BASEDIR
+# ORACLE_BASE=/a/b/c
+# LOGDIR=/x/y/z
+
+[[ -z "$ORACLE_BASE" ]] && ORACLE_BASE=/u01/app/oracle
+[[ -z "$LOGDIR" ]] && LOGDIR=${ORACLE_BASE}/admin/log
+export ORACLE_BASE LOGDIR

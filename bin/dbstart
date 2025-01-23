@@ -12,8 +12,13 @@
 # @@(#)  1.0     2025-01-22   jahrends   initial File
 # @(#) ============================================================================================
 
-ORACLE_BASE=/u01/app/oracle
-LOGDIR=${ORACLE_BASE}/admin/log
+if [ -r `pwd`/env ] 
+then
+  source `pwd`/env  
+else
+  [[ -z "$ORACLE_BASE" ]] && ORACLE_BASE=/u01/app/oracle
+  [[ -z "$LOGDIR" ]] && LOGDIR=${ORACLE_BASE}/admin/log
+fi
 DATUM=`date +%y%m%d`
 mkdir -p $LOGDIR
 #############################################################################################
