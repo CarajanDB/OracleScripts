@@ -95,3 +95,4 @@ then
 fi
 
 stopInstances
+echo "Instance Stopped"
