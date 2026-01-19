@@ -1,5 +1,5 @@
 # @(#) ============================================================================================
-# @(#) Filename    : CDBlib
+# @(#) Filename    : ORAlib
 # @(#) Author      : Johannes Ahrends, CarajanDB GmbH
 # @(#) Version     : 1.00
 # @(#) Date        : 2024-09-16
@@ -12,13 +12,10 @@
 # @@(#)  1.0      2024-09-16  jahr     Basic Version
 # @(#) ============================================================================================
 #
-#
-# Functions
-# getORAHome
-# GetInstance
-# InstUp
-# InstDOwn
-# Addbash_profile
+# Functions:
+#    Parameter
+#    Log_header
+#    Logger
 
 #############################################################################################
 #
