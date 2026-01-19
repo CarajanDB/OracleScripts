@@ -1,0 +1,90 @@
+ORALIBRARY=./ORAlib
+source $ORALIBRARY
+
+# =================================================================================================
+#
+# Usage
+#
+# =================================================================================================
+
+Usage() {
+  echo "Usage: $0 -v <VERSION> -s <STAGE> -i <INSTALLATIONSTYP> -a <ACTION>" 
+  echo "-a | --action        : Action, die ausgefuehrt werden soll (Beispiel)"
+  echo "-h | --help          : Diese Hilfe"
+  echo "Beispiel :$0 --action installsw"
+  exit 1
+}
+
+# =================================================================================================
+#
+# Read Script Options (getopt)
+#
+# Define Options
+#
+#  SHORT --> short option (e.g. -d)
+#  LONG --> long option (e.g. --database)
+#  : means that a second argument is required
+#
+# Return Values
+#   0 : Successful
+#  10 : Unsuccessful
+#  11 : Invalid Argument
+#
+# =================================================================================================
+
+ReadOptions() {
+  logger_debug "--> Function $FUNCNAME"
+  if [ $# -eq 0 ]
+  then
+    logger_fatal "Arguments required"
+    return 10
+  fi
+  SHORT="a:h"
+  LONG="action:help"
+  logger_debug "LONG=$LONG"
+  logger_debug "Arguments=$*"
+  OPTIONS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@" 2>/dev/null)
+  RC=$?
+  logger_debug "OPTIONS=$OPTIONS"
+  if [ "$RC" -ne 0 ]
+  then
+    logger_fatal "Invalid Arguments"
+    return 11
+  fi
+
+  eval set -- $OPTIONS
+  while true
+  do
+    case $1 in
+      -a|--action)     ACTION=$2
+                       logger_debug "ACTION=$ACTION"
+                       shift 2 ;;
+      -h|--help)       Usage
+                       shift;;
+      --)              shift;break;;
+ 
+    esac
+  done
+
+  if [ -z "$ACTION" ] 
+  then
+    logger_error "Aktion muss angegeben werden"
+    return 1
+  fi
+  logger_debug "<-- Function $FUNCNAME"
+  return 0
+}
+
+# =================================================================================================
+#
+# Main
+#
+# =================================================================================================
+
+Logger 
+ReadOptions $*
+RC=$?
+if [ $RC -ne 0 ]
+then
+  Usage 
+fi
