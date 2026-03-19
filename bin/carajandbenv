@@ -1,0 +1,80 @@
+#######################################################################################################################
+#
+# Filename: carajandbenv
+#
+# Autor:    Johannes Ahrends, CarajanDB GmbH
+# Version:  1.1
+# Datum:    2024-08-13
+#
+# Beschreibung: Setzen von nuetzlichen Variablen und Aliase fuer den Datenbanketrieb
+#
+# Das Skript wird aus der Datei /usr/local/bin/oraenv aus aufgerufen mit . /usr/local/bin/carajandbenv
+#
+# Historie:
+#
+# Version   Datum        Autor            Beschreibung
+# --------  ------------ ---------------  -------------------------------------------------------
+# 1.0       2023-04-20   J. Ahrends       Initiales Skript
+# 1.1       2024-08-13   J. Ahrends       Alias fuer MGMTDB
+#
+#######################################################################################################################
+
+#
+# Betriebssystemprompt
+#
+if [ "$USER" != "root" ]
+then
+   PS1="${USER}@`hostname -s`[${ORACLE_SID}]%:\w> "
+else
+   PS1="${USER}@`hostname -s`[${ORACLE_SID}]# "
+fi
+
+export PS1
+#
+# Aliase, wenn rlwrap installiert ist
+# wget https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+# rpm -Uvh epel-release-latest-8.noarch.rpm
+# dnf -y install rlwrap
+#
+if [ -x "/usr/bin/rlwrap" ]
+then
+   alias sqp='rlwrap sqlplus / as sysdba'
+   alias sqr='rlwrap sqlplus'
+   alias dgr='rlwrap dgmgrl'
+   alias rmn='rlwrap rman target /'
+fi
+#
+# Alias fuer das Alertfile Verzeichnis
+#
+alias alertdir='cd ${ORACLE_BASE}/`adrci exec="set base ${ORACLE_BASE};show homes" | grep -i -E /${ORACLE_SID}`/trace'
+alias oh='cd $ORACLE_HOME'
+alias ob='cd $ORACLE_BASE'
+#
+# Aliase etc, falls die Grid Infrastructure installiert ist
+#
+if [ -d "/u01/app/gridbase/diag" ]
+then
+   GRID_BASE=/u01/app/gridbase
+   alias gh='cd $GRID_HOME'
+   alias asmlog='cd ${GRID_BASE}/`adrci exec="set base ${GRID_BASE};show homes" | grep -i /+ASM`/trace'
+   alias crslog='cd ${GRID_BASE}/`adrci exec="set base ${GRID_BASE};show homes" | grep -i /crs`/trace'
+   alias asm='ORACLE_SID=`fgrep -i +asm /etc/oratab |cut -d: -f 1`;ORAENV_ASK=NO; . oraenv -s; unset ORAENV_ASK'
+fi
+#
+# Aliase fuer jede Datenbank, die in der /etc/oratab mit "Y" gekennzeichnet ist
+#
+unset alldbs
+oldsid=$ORACLE_SID
+dbs=`fgrep ":Y" /etc/oratab | cut -d: -f1|tr '[:upper:]' '[:lower:]'`
+alias dbs='echo $dbs'
+for mydb in `fgrep ":Y" /etc/oratab | cut -d: -f1`
+do
+   ORACLE_SID=$mydb
+   mydb=`echo $mydb |tr '[:upper:]' '[:lower:]'`
+   alias -- ${mydb}="export ORACLE_SID=${ORACLE_SID};ORAENV_ASK=NO;. oraenv -s ; unset ORAENV_ASK"
+   alldbs="$alldbs $mydb"
+done
+echo $alldbs
+ORACLE_SID=$oldsid
+unset mydb
+
