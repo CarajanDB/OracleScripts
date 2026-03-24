@@ -1,0 +1,5 @@
+-- Vorarbeiten
+-- ZIEL
+--
+CREATE USER c##carclone IDENTIFIED BY abc1234DEF_abc1234;
+GRANT CREATE SESSION, sysoper, CREATE PLUGGABLE DATABASE to c##carclone CONTAINER=ALL;

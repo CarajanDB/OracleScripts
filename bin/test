@@ -1,20 +1,29 @@
 # @(#) ============================================================================================
-# @(#) Filename    : <SCRIPTNAME>
-# @(#) Author      : Johannes Ahrends, CarajanDB GmbH
-# @(#) Version     : 1.0
-# @(#) Date        : <DATUM>
-# @(#) Description : <DESCRIPTION>
+# @(#) Filename       : Test
+# @(#) Author         : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version        : 1.0
+# @(#) Date           : 2026-03-20
+# @(#) Description    : Test
+# @(#) Voraussetzung  : 
 # @(#)
 # @@(#)  Change History:
 # @(#)
 # @@(#)  Version Date         Author      Description
 # @@(#)  ------------------------------------------------------------------------------------------
-# @@(#)  1.0     <DATUM>   jahrends   initial File
+# @@(#)  1.0     2026-03-23   jahrends    Initiales Skript
 # @(#) ============================================================================================
 
-BASEDIR="$BASEDIR:-/home/oracle"
-CUSTOMERLIB="${BASEDIR}/lib/CUSTOMERLIB"
-source $CUSTOMERLIB
+#
+# Local Setup
+#
+[[ -z "$BASEDIR" ]] && BASEDIR=$HOME/OracleScripts
+BINDIR=$BASEDIR/bin
+LIBDIR=$BASEDIR/lib
+LOGDIR=$BASEDIR/log
+source ${LIBDIR}/CarajanDB.lib
+Parameter
+Logger 
+unset RC
 
 # =================================================================================================
 #
@@ -24,16 +33,17 @@ source $CUSTOMERLIB
 
 usage() {
   logger_info ""
-  logger_info "  Command     : <SCRIPTNAME>"
-  logger_info "  Description : $SCRIPTSHORTDESC"
+  logger_info "  Command     : $0  ..."
+  logger_info "  Description : "
   logger_info ""
   logger_info "  Parameters  :"
   logger_info "                -h | --help               help screen"
   logger_info ""
-  logger_info "  Example     : <SCRIPTNAME>
+  logger_info "  Example     : $0 "
   logger_info ""
   logger_info "  Attention   : This script must be started as user ORACLE"
   logger_info ""
+  exit 1
 }
 
 # =================================================================================================
@@ -60,8 +70,8 @@ ReadOptions() {
     logger_fatal "Arguments required"
     return 10
   fi
-  SHORT="h"
-  LONG="help"
+  SHORT="hl:"
+  LONG="help,list:"
   logger_debug "LONG=$LONG"
   logger_debug "Arguments=$*"
   OPTIONS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@" 2>/dev/null)
@@ -77,6 +87,9 @@ ReadOptions() {
   while true
   do
     case $1 in
+      -l|--list)        VARIABLE=$2
+                        logger_debug "VARIABLE=$VARIABLE"
+                        shift 2;;
       -h|--help)        usage
                         shift;;
       --)               shift;break;;
@@ -85,3 +98,26 @@ ReadOptions() {
   logger_debug "<-- Function $FUNCNAME"
   return 0
 }
+
+# =================================================================================================
+#
+# Main
+#
+# =================================================================================================
+
+# Read Parameters
+if [ $# -ne 0 ]
+then
+  ReadOptions $*
+  RC=$?
+  if [ $RC -ne 0 ]
+  then
+    logger_error "..."
+    usage
+  fi
+else
+  usage
+fi
+
+logger_info  "Hallo"
+exit 0

@@ -1,0 +1,206 @@
+# @(#) ============================================================================================
+# @(#) Filename       : cloneDemo.sh
+# @(#) Author         : Johannes Ahrends, CarajanDB GmbH
+# @(#) Version        : 1.0
+# @(#) Date           : 2026-03-20
+# @(#) Description    : Kopiert die PDB DEMO von Server 1 nach Server 2
+# @(#) Voraussetzung  : Ausfuehrung auf dem Zielserver (2)
+# @(#)
+# @@(#)  Change History:
+# @(#)
+# @@(#)  Version Date         Author      Description
+# @@(#)  ------------------------------------------------------------------------------------------
+# @@(#)  1.0     2025-01-22   jahrends    Initiales Skript
+# @(#) ============================================================================================
+
+#
+# Local Setup
+#
+DBLINK=democlone
+[[ -z "$BASEDIR" ]] && BASEDIR=$HOME/OracleScripts
+BINDIR=$BASEDIR/bin
+LIBDIR=$BASEDIR/lib
+source ${LIBDIR}/CarajanDB.lib
+Parameter
+Logger 
+unset RC
+
+# =================================================================================================
+#
+# Function Usage
+#
+# =================================================================================================
+
+usage() {
+  logger_info ""
+  logger_info "  Command     : $0 -p|--pdb <PDBNAME>"
+  logger_info "  Description : Loescht und/oder erstellt die PDB <PDBNAME>"
+  logger_info ""
+  logger_info "  Parameters  :"
+  logger_info "                -h | --help               help screen"
+  logger_info "                -p | --pdbname            Erstellt die PDB"
+  logger_info ""
+  logger_info "  Example     : $0 -p DEMO"
+  logger_info ""
+  logger_info "  Attention   : This script must be started as user ORACLE"
+  logger_info ""
+  exit 1
+}
+
+# =================================================================================================
+#
+# Read Script Options (getopt)
+#
+# Define Options
+#
+#  SHORT --> short option (e.g. -d)
+#  LONG --> long option (e.g. --database)
+#  : means that a second argument is required
+#
+# Return Values
+#   0 : Successful
+#  10 : Unsuccessful
+#  11 : Invalid Argument
+#
+# =================================================================================================
+
+ReadOptions() {
+  logger_debug "--> Function $FUNCNAME"
+  if [ $# -eq 0 ]
+  then
+    logger_fatal "Arguments required"
+    return 10
+  fi
+  SHORT="hp:"
+  LONG="help,pdbname:"
+  logger_debug "LONG=$LONG"
+  logger_debug "Arguments=$*"
+  OPTIONS=$(getopt --options $SHORT --long $LONG --name "$0" -- "$@" 2>/dev/null)
+  RC=$?
+  logger_debug "OPTIONS=$OPTIONS"
+  if [ "$RC" -ne 0 ]
+  then
+    logger_fatal "Invalid Arguments"
+    return 11
+  fi
+
+  eval set -- $OPTIONS
+  while true
+  do
+    case $1 in
+      -p|--pdbname)     PDBNAME=$2
+                        logger_debug "PDBNAME=$PDBNAME"
+                        shift 2;;
+      -h|--help)        usage
+                        shift;;
+      --)               shift;break;;
+    esac
+  done
+  logger_debug "<-- Function $FUNCNAME"
+  return 0
+}
+
+# =================================================================================================
+#
+# CheckPDB
+#
+# =================================================================================================
+
+CheckPDB() {
+  logger_debug "--> Function $FUNCNAME"
+  SQLMESSAGE=$(sqlplus -s / as sysdba <<EOSQL
+  DEFINE PDBNAME=$PDBNAME
+  set heading off feedback off pages 0 lines 1000 trimspool on verify off
+  SELECT ltrim(count(*)) FROM cdb_pdbs WHERE pdb_name='&PDBNAME.';
+EOSQL
+)
+  logger_debug "SQLMESSAGE=$SQLMESSAGE"
+  if [ $(echo $SQLMESSAGE | wc -w) -gt 1 ]
+  then
+    logger_error "Fehler beim Erstellen der Pluggable Database $PDBNAME"
+    exit 2
+  fi
+  logger_debug "<-- Function $FUNCNAME"
+  return 0
+}
+
+# =================================================================================================
+#
+# CreatePDB
+#
+# =================================================================================================
+
+CreatePDB() {
+  logger_debug "--> Function $FUNCNAME"
+  CheckPDB
+  SQLMESSAGE2=$(sqlplus -s / as sysdba <<EOSQL
+  DEFINE PDBNAME=$PDBNAME
+  DEFINE DBLINK=$DBLINK
+  WHENEVER SQLERROR EXIT
+  set heading off feedback off pages 0 lines 1000 trimspool on verify off echo on
+DECLARE
+   l_pdbs NUMBER := 0;
+BEGIN
+   SELECT count(*) INTO l_pdbs FROM cdb_pdbs WHERE pdb_name='&PDBNAME.';
+   if ( l_pdbs = 1 ) then
+     execute immediate 'ALTER PLUGGABLE DATABASE &PDBNAME. CLOSE IMMEDIATE';
+     execute immediate 'DROP PLUGGABLE DATABASE &PDBNAME. INCLUDING DATAFILES';
+   end if;
+   execute immediate 'CREATE PLUGGABLE DATABASE &PDBNAME. FROM &PDBNAME.@&DBLINK.';
+   execute immediate 'ALTER PLUGGABLE DATABASE &PDBNAME. OPEN';
+   execute immediate 'ALTER PLUGGABLE DATABASE &PDBNAME. SAVE STATE';
+END;
+/
+   set termout on echo on feedback off
+   SELECT ltrim(decode(open_mode,'READ WRITE',0,1)+decode(restricted,'NO',0,2)) FROM v\$pdbs WHERE name='&PDBNAME.';
+  set heading on feedback on pages 0 lines 1000 trimspool on verify on echo on
+EOSQL
+)
+   logger_debug "SQLMESSAGE2=$SQLMESSAGE2"
+   if [ "$SQLMESSAGE2" -gt 0 ]
+   then
+      logger_error "FEhler beim Erstellen der neuen Pluggable Database $PDBNAME"
+      return 2
+   fi
+     
+  logger_debug "<-- Function $FUNCNAME"
+  return 0
+}
+
+# =================================================================================================
+#
+# Main
+#
+# =================================================================================================
+
+# Read Parameters
+if [ $# -ne 0 ]
+then
+  ReadOptions $*
+  RC=$?
+  if [ $RC -ne 0 ]
+  then
+    logger_error "Name of Pluggable Database required"
+    usage
+  fi
+else
+  usage
+fi
+if [ -z "$PDBNAME" ]
+then
+   logger_error "Name of Pluggable Database required"
+   usage
+fi
+OraEnv
+
+logger_info "Pluggable Database $PDBNAME wird neu erstellt"
+CreatePDB $PDBNAME
+RC=$?
+if [ "$RC" -gt 0 ]
+then
+   logger_error "Fehler beim Erstellen der PDB $PDBNAME"
+   exit 3
+else
+   logger_info "Pluggable Database $PDBNAME erfolgreich erstellt"
+fi
+exit 0

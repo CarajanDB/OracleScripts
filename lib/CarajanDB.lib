@@ -1,5 +1,5 @@
 # @(#) ============================================================================================
-# @(#) Filename    : CDBlib
+# @(#) Filename    : CarajanDBlib
 # @(#) Author      : Johannes Ahrends, CarajanDB GmbH
 # @(#) Version     : 1.00
 # @(#) Date        : 2024-09-16
@@ -24,8 +24,7 @@
 #############################################################################################
 
 function Parameter() {
-  logger_debug "--> $FUNCNAME"
-  logger_debug "<-- $FUNCNAME $RC"
+  PARAMETER1=0
 }
 
 # =================================================================================================
@@ -35,17 +34,17 @@ function Parameter() {
 # =================================================================================================
 
 log_header() {
-   WHAT=$BINDIR/what
-   local SCRIPTNAME=$(basename $0)
-   local SCRIPTPATH=$(dirname $0)
-   local SCRIPTVERSION="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep '# @(#) Version'|awk '{print $3,$4,$5}'`"
-   local SCRIPTDATE="`$WHAT $SCRIPTDIR/$SCRIPTNAME|grep '# @(#) Datum'|awk '{print $3,$4,$5}'`"
+   local SCRIPTNAME=$1
+   logger_debug "SCRIPTNAME=$SCRIPTNAME"
+
+   local SCRIPTVERSION=$(cat $SCRIPTNAME|grep '# @(#) Version'|awk '{print $3,$4,$5}')
+   local SCRIPTDATE=$(cat $SCRIPTNAME|grep '# @(#) Datum'|awk '{print $3,$4,$5}')
    logger_info "$SCRIPTNAME gestartet"
    logger_info "$SCRIPTNAME $*"
    logger_info "$SCRIPTVERSION"
    logger_info "$SCRIPTDATE"
    logger_info "$PARAMETER"
-   logger_info "$L4SH_DEBUGLOG"
+   logger_info "Debug Logfile: $L4SH_DEBUGLOG"
 }
 
 #############################################################################################
@@ -55,27 +54,17 @@ log_header() {
 #############################################################################################
 
 function Logger () {
-  local VARIABLE=$1
   local REINIT=${2:-0}    # Set it to 1 if you run Logger() again in same shell
-  if [ -n "$COLORLOG" ]
-  then
-    LOG4SH=$LIBDIR/log4shcolor
-  else
-    LOG4SH=$LIBDIR/log4sh
-  fi
+  [[ ! -d "$LOGDIR" ]] && mkdir -p $LOGDIR
+  LOG4SH=$BINDIR/log4sh
   VARIABLE=''
   if [ $# -gt 0 ]
   then
     VARIABLE=$1
   fi
-  if [ -r $LOG4SH ]
+  if [ -r "$LOG4SH" ]
   then
-    if [ -r log4sh.properties ]
-    then
-      LOG4SH_CONFIGURATION="log4sh.properties"
-    else
-      LOG4SH_CONFIGURATION="$SCRIPTDIR/log4sh.properties"
-    fi
+    LOG4SH_CONFIGURATION="${LIBDIR}/log4sh.properties"
     if [ "$REINIT" -eq 1 ]; then
      # remove 'readonly variable' error output
       LOG4SH_CONFIGURATION=$LOG4SH_CONFIGURATION . $LOG4SH 2>/dev/null
@@ -88,7 +77,34 @@ function Logger () {
   fi
   # Get debug log file from LOG4SH_CONFIGURATION
   L4SH_DEBUGLOG=$(grep -i "log4sh.appender.cdbPattern.File" $LOG4SH_CONFIGURATION |
-                  grep -v "^[ ]*#" | sed 's/ *log4sh.appender.cdbPattern.File *= *//')
+                  grep -v "^[ ]*#" | sed 's/ *log4sh.appender.CDBPattern.File *= *//')
   L4SH_DEBUGLOG=`eval echo $L4SH_DEBUGLOG`
-  log_header
+  log_header $0
+}
+
+#############################################################################################
+#
+# OraEnv
+#
+#############################################################################################
+
+OraEnv() {
+  logger_debug "--> Function $FUNCNAME"
+  if [ -z  "$ORACLE_SID" ]
+  then
+     set $(ps -ef |grep ora_pmon | grep -v grep |  awk '{ print $NF }' | cut -d_ -f3)
+     if [ $# -gt 1 ]
+     then
+        logger_error "Es gibt mehr als eine Datenbank auf diesem Server, bitte ORACLE_SID und ORACLE_HOME explizit setzen"
+        exit 1
+      else
+         ORACLE_SID=$1
+         ORAENV_ASK=NO
+         . oraenv -s
+         unset ORAENV_ASK
+      fi
+  fi
+
+  logger_debug "<-- Function $FUNCNAME"
+  return 0
 }

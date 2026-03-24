@@ -1,21 +1,21 @@
 Oracle Database scripts
 -----------------------
 
+bin-Verzeichnis
+
 dboracle.service   --> Service fuer Linux systemd 
 dbstart            --> Startkript fuer Datenbank und listener
-dbstop             --> Stopskript fuer Datenbank und listener
-env                --> Variablen, falls die Verzeichnisstruktur vom Default abweicht (z.B. ORACLE_BASE=/u01/app/oracle)
+dbstop             --> Stoppskript fuer Datenbank und listener
+clonepdb           --> Clone einer PDB fuer ein Testsystem
+log4sh             --> Shell Logger
 
-Vorgehensweise bei der Installation:
+Vorgehensweise bei der Installation fuer den Automatischen Startup der Oracle Datenbank
 
-cp dbstart dbstop /usr/local/bin
-chmod 755 /usr/local/bin/dbs*
 cp dboracle.service /lib/systemd/system
 systemctl daemon-reload
 systemctl start dboracle.service
 systemctl enable dboracle.service
 
-
-header             --> keines Tool, um die Header Informationen (version, datum, autor, bemerkung) zu pflegen
-what               --> kleines Tool, um die Headerinformationen abzufragen
-
+lib-Verzeichnis
+CarajanDB.lib     --> Library mit einfachen Shell Funktionen
+log4sh.properties --> Logger Properties fuer Shell Skripte
