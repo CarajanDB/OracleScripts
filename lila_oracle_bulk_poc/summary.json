@@ -1,0 +1,7 @@
+{
+  "input_file": "pegel-qvhs-spalte.lila",
+  "stations": 16,
+  "data_rows": 232,
+  "observations_rows": 3712,
+  "run_vorhersagezeitpunkt": "09.01.2026 10:00"
+}

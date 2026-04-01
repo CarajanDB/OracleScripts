@@ -1,0 +1,17 @@
+station_name,gewaesser,stationsnummer,datenart,dimension,datenbezug,zeitzone,zeitintervall,datentyp,datenursprung,flaeche,flusskilometer,vorhersagezeitpunkt,kommentar
+Ewattingen,Wutach,0072,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,357.3,112.184,09.01.2026 10:00,Abfluss Vorhersage
+Eberfingen,Wutach,0001,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,564.3,90.919,09.01.2026 10:00,Abfluss Vorhersage
+Oberlauchringen,Wutach,0073,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,641.3,76.54,09.01.2026 10:00,Abfluss Vorhersage
+Illmuehle,Steina,0340,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,53.0,92.519,09.01.2026 10:00,Abfluss Vorhersage
+Hangkanal-offenesGerinne,Hangkanal,0000,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,4.704,102.158,09.01.2026 10:00,Abfluss Vorhersage
+Buggenrieder Muehle,Mettma,0000,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,24.0,88.713,09.01.2026 10:00,Abfluss Vorhersage
+Wutachmuendung,Wutach,0000,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,1142.062,68.031,09.01.2026 10:00,Abfluss Vorhersage
+St-Blasien,Hauensteiner Alb,0206,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,101.3,79.89,09.01.2026 10:00,Abfluss Vorhersage
+Wehra (Pegel),Wehra,0000,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,61.0,41.25,09.01.2026 10:00,Abfluss Vorhersage
+Sammelknoten Biber-Durach,Biber und Durach,4111,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,2268.362,0.015,09.01.2026 10:00,Abfluss Vorhersage
+Sammelknoten Volken-Rafzenbach,Volken- und Rafzenbach,4112,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,2268.362,0.013,09.01.2026 10:00,Abfluss Vorhersage
+Sammelknoten Wutach,Wutach,4113,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,2268.362,0.011,09.01.2026 10:00,Abfluss Vorhersage
+Sammelknoten Hauensteiner Alb,Hauensteiner Alb,4114,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,2268.362,0.009,09.01.2026 10:00,Abfluss Vorhersage
+Sammelknoten Hauensteiner Murg,Hauensteiner Murg,4115,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,2268.362,0.007,09.01.2026 10:00,Abfluss Vorhersage
+Sammelknoten Wehra,Wehra,4116,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,2268.362,0.005,09.01.2026 10:00,Abfluss Vorhersage
+Sammelknoten Duerren-Warmbach,Duerren- und Warmbach,4117,Q,cbm/s,GTS,UTC+1,01:00,M,vhs,2268.362,0.003,09.01.2026 10:00,Abfluss Vorhersage
