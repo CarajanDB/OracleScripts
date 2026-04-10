@@ -1,0 +1,112 @@
+#########################################################################################################
+#
+# Oracle Datenbank Installsation
+#
+# Vorbereitungen
+# 
+# Version 1.4
+#
+# Historie
+# 
+# Version Autor          Datum      Beschreibung
+# ------- -------------- ---------- ------------------------------------------------------------------
+# 1.0     J. Ahrends     04.05.2017 Initialies Skript
+# 1.1     J. Ahrends     19.05.2017 rlwrap Utility integriert
+# 1.2     J. Ahrends     15.09.2021 Anpassungen 19c
+# 1.3     J. Ahrends     18.07.2025 Anpassungen OL9
+# 1.4     J. Ahrends     2025-03-24 Anpassungen
+#
+#########################################################################################################
+
+dnf update
+
+dnf -y install oracle-database-preinstall-19c
+dnf -y install wget
+dnf -y install ntp
+
+## OEL9
+wget https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+rpm -Uvh epel-release-latest-9.noarch.rpm
+
+dnf -y install rlwrap 
+
+cp -f /etc/selinux/config /etc/selinux/config.org
+sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+
+#########################################################################################################
+#
+# Oracle OS User und Gruppen:
+# Gruppen:
+#    oinstall   --> 101  : Gruppe, dem die Software geh rt
+#    dba        --> 102  : Datenbank Administrator (OSDBA)
+#
+# Benutzer:
+#    oracle     --> 1001 : Besitzer der Datenabankdateien und Software  (Password: oracle)
+#
+#########################################################################################################
+
+groupadd -g 1101 oinstall
+groupadd -g 1102 dba
+useradd -c "Oracle DBA" -d /home/oracle -g oinstall -G dba,oper,asmdba,backupdba,dgdba,kmdba -p oracle -s /bin/bash -u 111d1 oracle
+
+# Memlock Parameter
+cp -f /etc/security/limits.conf /etc/security/limits.conf.org
+sed -i '$i oracle            -    memlock         unlimited' /etc/security/limits.conf
+sed -i '$i grid              -    memlock         unlimited' /etc/security/limits.conf
+sed -i '$i grid             hard  nofile          65536'     /etc/security/limits.conf
+
+sed -i '$i oracle ALL=(ALL) NOPASSWD: ALL' /etc/sudoers
+sed -i '$i grid ALL=(ALL) NOPASSWD: ALL' /etc/sudoers
+
+mkdir -p /u01/app/oraInventory   # Inventory
+mkdir -p /u01/app/oracle         # Oracle DB Software (ORACLE_BASE)
+mkdir -p /u01/app/gridbase       # Oracle GI Base Directory (GRID_BASE)
+mkdir -p /u01/app/grid           # Oracle GI Software
+mkdir -p /u02/oradata            # Oracle Datafiles (wenn nicht ASM)
+mkdir -p /u03/fast_recovery_area # Fast Recovery Area
+chown -R oracle:dba /u02/oradata
+chown -R oracle:dba /u03/fast_recovery_area
+chown -R oracle:oinstall /u01/app/oracle
+chown -R oracle:oinstall /u01/app/oraInventory
+chown -R grid:oinstall /u01/app/grid
+chown -R grid:oinstall /u01/app/gridbase 
+
+passwd oracle
+
+systemctl stop firewalld
+systemctl disable firewalld
+
+#########################################################################################################
+#
+# Nach der Software Installation sollte folgende Datei in /usr/local/bin/oraenv eingetragen werden
+#
+#########################################################################################################
+
+cp OracleScripts/bin/carajandbenv /usr/local/bin
+echo ". /usr/local/bin/carajandbenv" >> /usr/local/bin/oraenv
+
+########################################################################################################
+#
+# Nach dem Erstellen der Datenbank (Eintrag in /etc/oratab nicht vergessen)
+# wird der Datenbank bzw. Instanzname in die Datei $HOME/.bash_profile wie folgt eingetragen
+# F r grid ist der Datenbankname ASM bzw. ASM1...
+#
+#########################################################################################################
+
+ORACLE_SID=<DBNAME>
+export ORACLE_SID
+ORAENV_ASK=NO
+. oraenv
+unset ORAENV_ASK
+#
+# Lange Wartezeiten beim ssh login:
+#
+# sed -i 's/# UseDNS yes/UseDNS no/'  /etc/ssh/sshd_config
+
+#  ändern der Einstellungen fuer SQL*Plus
+echo "set lines 200" >> $ORACLE_HOME/sqlplus/admin/glogin.sql
+echo "set pages 1000"  >> $ORACLE_HOME/sqlplus/admin/glogin.sql
+
+#
+# Start und stop skripte einbauen
+#

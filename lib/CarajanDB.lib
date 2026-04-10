@@ -25,6 +25,7 @@
 
 function Parameter() {
   PARAMETER1=0
+#  REINIT=0
 }
 
 # =================================================================================================
@@ -54,14 +55,12 @@ log_header() {
 #############################################################################################
 
 function Logger () {
-  local REINIT=${2:-0}    # Set it to 1 if you run Logger() again in same shell
+  REINIT=${1:-0}    # Set it to 1 if you run Logger() again in same shell
+  VARIABLE=${2:-0}    # Set it to 1 if you run Logger() again in same shell
+  echo REINIT=$REINIT
   [[ ! -d "$LOGDIR" ]] && mkdir -p $LOGDIR
   LOG4SH=$BINDIR/log4sh
   VARIABLE=''
-  if [ $# -gt 0 ]
-  then
-    VARIABLE=$1
-  fi
   if [ -r "$LOG4SH" ]
   then
     LOG4SH_CONFIGURATION="${LIBDIR}/log4sh.properties"
